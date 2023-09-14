@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=gpu-2080ti
+#SBATCH --partition=gpu-a40
 #SBATCH --account=ark
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
@@ -17,5 +17,5 @@ echo "--------------------"
 source ~/.bashrc
 conda activate temporal
 
-# srun python src/MIA_llama.py
-srun python src/detectGPT.py
+srun python src/MIA_llama.py
+# srun python src/detectGPT.py

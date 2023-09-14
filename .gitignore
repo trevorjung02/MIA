@@ -2,3 +2,4 @@ slurm*
 __MACOSX
 output
 data
+src/__pycache__*
