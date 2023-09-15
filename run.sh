@@ -17,5 +17,6 @@ echo "--------------------"
 source ~/.bashrc
 conda activate temporal
 
-srun python src/MIA_llama.py
+# srun python src/MIA_llama.py
 # srun python src/detectGPT.py
+srun python src/train.py

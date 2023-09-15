@@ -3,3 +3,4 @@ __MACOSX
 output
 data
 src/__pycache__*
+checkpoints
