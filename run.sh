@@ -15,8 +15,11 @@ cat $0
 echo "--------------------"
 
 source ~/.bashrc
-conda activate temporal
+conda activate mia
 
-# srun python src/MIA_llama.py
+srun python src/MIA/MIA_llama.py --target_path=checkpoints/gpt2/run_5/epoch-0_perplexity-23.6118 --gamma=1
 # srun python src/detectGPT.py
-srun python src/train.py
+# srun python src/train.py --train_path=data/newsSpace_other_ref_train.csv --val_path=data/newsSpace_oracle_val.csv
+
+# srun conda env update -f environment.yml
+# srun jupyter-lab

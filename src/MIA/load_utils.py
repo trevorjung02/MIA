@@ -3,6 +3,20 @@ import random
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
 import torch
+from argparse import ArgumentParser
+import os
+
+def create_new_dir(dir: str) -> str:
+    if not os.path.exists(dir):
+        num = 1
+    else:
+        files = set(os.listdir(dir))
+        num = len(files)+1
+        while f"run_{num}" in files:
+            num += 1
+    new_dir = os.path.join(dir, f"run_{num}")
+    os.makedirs(new_dir, exist_ok=False)
+    return new_dir
 
 def load_jsonl(input_path):
     with open(input_path, 'r') as f:
@@ -21,23 +35,24 @@ def read_jsonl(path):
     with open(path, 'r') as f:
         return [json.loads(line) for line in tqdm(f)]
     
-def load_model(name1, name2):
-    tokenizer = AutoTokenizer.from_pretrained(name1)
-    # tokenizer.padding_side = "left" 
-    # tokenizer.pad_token = tokenizer.eos_token , load_in_8bit=True , load_in_8bit=True
+def load_model(target_name, ref_name, target_path=None, ref_path=None):
     CACHE_DIR = '/mmfs1/gscratch/ark/tjung2/continual-knowledge-learning/huggingface'
-    if "gpt2" in name1:
-        model1 = AutoModelForCausalLM.from_pretrained(name1, return_dict=True, device_map='auto', cache_dir=CACHE_DIR)
-        model2 = AutoModelForCausalLM.from_pretrained(name2, return_dict=True, device_map='auto', cache_dir=CACHE_DIR)
-    else:
-        model1 = AutoModelForCausalLM.from_pretrained(name1, return_dict=True, device_map='auto', torch_dtype=torch.float16, cache_dir=CACHE_DIR)
-        model2 = AutoModelForCausalLM.from_pretrained(name2, return_dict=True, device_map='auto', torch_dtype=torch.float16, cache_dir=CACHE_DIR)
-        # torch_type = torch.float16
-    # model1 = AutoModelForCausalLM.from_pretrained(name1, return_dict=True, device_map='auto')
-    # model2 = AutoModelForCausalLM.from_pretrained(name2, return_dict=True, device_map='auto')
-    # , load_in_8bit=True dtype=float16
-    model1.eval()
-    model2.eval()
-    tokenizer1 = AutoTokenizer.from_pretrained(name1)
-    tokenizer2 = AutoTokenizer.from_pretrained(name1)
-    return model1, model2, tokenizer1, tokenizer2
+    
+    target_model = AutoModelForCausalLM.from_pretrained(target_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+    if target_path:
+        ckpt = torch.load(target_path)
+        target_model.load_state_dict(ckpt['model_state_dict'])
+    
+    ref_model = AutoModelForCausalLM.from_pretrained(ref_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+    if ref_path:
+        ckpt = torch.load(ref_path)
+        ref_model.load_state_dict(ckpt['model_state_dict'])
+
+    target_model.eval()
+    ref_model.eval()
+    tokenizer1 = AutoTokenizer.from_pretrained(target_name)
+    tokenizer1.pad_token = tokenizer1.eos_token
+    tokenizer2 = AutoTokenizer.from_pretrained(target_name)
+    tokenizer2.pad_token = tokenizer2.eos_token
+
+    return target_model, ref_model, tokenizer1, tokenizer2

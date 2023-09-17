@@ -54,15 +54,6 @@ def fig_fpr_tpr(all_output, output_dir):
             legend, auc, acc, low = do_plot(predictions, answers, legend=metric, metric='auc', output_dir=output_dir)
             f.write('%s   AUC %.4f, Accuracy %.4f, TPR@0.1%%FPR of %.4f\n'%(legend, auc, acc, low))
 
-    # auc to google
-    with open(f"{output_dir}/auc_google.txt", "w") as f:
-        for metric, predictions in metric2predictions.items():
-            # print(metric)
-            # print(predictions)
-            legend, auc, acc, low = do_plot(predictions, answers, legend=metric, metric='auc', output_dir=output_dir)
-            f.write(f'{legend}	{round(auc, 3)}\n')
-# 0.6619	0.6354
-
     plt.semilogx()
     plt.semilogy()
     plt.xlim(1e-5,1)

@@ -1,22 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import datasets
-import transformers
 import re
-import torch
-import torch.nn.functional as F
-import random
 from sklearn.metrics import roc_curve, precision_recall_curve, auc
-import argparse
-import datetime
-import os
-from tqdm import tqdm
-import json
-import functools
-from multiprocessing.pool import ThreadPool
-import time
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import argparse
 
 class DetectGPTPerturbation():
     def __init__(self):

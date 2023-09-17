@@ -2,5 +2,8 @@ slurm*
 __MACOSX
 output
 data
-src/__pycache__*
 checkpoints
+.ipynb_checkpoints
+mia.ipynb
+test.py
+*__pycache__
