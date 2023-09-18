@@ -1,21 +1,22 @@
 import logging
 logging.basicConfig(level='ERROR')
-import numpy as np
-from pathlib import Path
-from pprint import pprint
 import torch
 import zlib
 import json
-from tqdm import tqdm
+import io
+import numpy as np
 import pandas as pd
+from pathlib import Path
+from pprint import pprint
+from tqdm import tqdm
 from torch.nn import CrossEntropyLoss
+from torch.utils.data import DataLoader
 from argparse import ArgumentParser
 from sklearn.metrics import auc, roc_curve
 
 from plots import fig_fpr_tpr
 from load_utils import load_jsonl, load_model, read_jsonl, dump_jsonl, create_new_dir
 from detectGPT import DetectGPTPerturbation
-from torch.utils.data import DataLoader
 
 # load detectGPT
 # detect_gpt = DetectGPTPerturbation()
@@ -40,47 +41,34 @@ def calculatePerplexity(sentence, model, tokenizer, gpu):
     return torch.exp(loss).item(), all_prob
 
 
-def inference(model1, model2, tokenizer1, tokenizer2, text, ex, losses1, losses2, args):
-    # ex["pred"] = {}
+def compute_decision(target_loss, target_ref, target_losses_z, ref_losses_z, args):
     pred = {}
 
-    # perplexity of large and small models
-    p_target, all_prob = calculatePerplexity(text, model1, tokenizer1, gpu=model1.device)
-    p_ref, _ = calculatePerplexity(text, model2, tokenizer2, gpu=model2.device)
-    p_lower, _= calculatePerplexity(text.lower(), model1, tokenizer1, gpu=model1.device)
-
-    # detectGPT 
-    # perturbed_text = detect_gpt.perturb(text)
-    # p_perturb, _ = calculatePerplexity(perturbed_text, model1, tokenizer1, gpu=model1.device)
-
-    # detectGPT on reference
-    # p_ref_perturb, _ = calculatePerplexity(perturbed_text, model2, tokenizer2, gpu=model2.device)
-
-    # ppl
-    pred["ppl"] = p_target
-    # Ratio of log ppl of large and small models
-    pred["log_ppl/log_ref_ppl"] = (np.log(p_target)/np.log(p_ref)).item()
+    # Loss
+    pred["loss"] = target_loss.item()
+    # Ratio of loss of large and small models
+    pred["loss/ref_loss"] = (target_loss/target_ref).item()
     
-    # pred[f"log_ppl/log_ppl_perturb"] = (np.log(p_target)/np.log(p_perturb)).item()
+    # RMIA
+    rmia_losses = ref_losses_z / target_losses_z 
+    rmia_losses = torch.sort(rmia_losses)[0]
 
-    num_z_dominated = 0
-    for loss1, loss2 in zip(losses1, losses2):
-        if np.log(p_target) / loss1 * loss2 / np.log(p_ref) < args['gamma']:
-            num_z_dominated += 1
-    pred["RMIA"] = 1 - num_z_dominated / len(losses1)
-    print(pred['RMIA'])
+    # num_z_dominated_it = 0
+    # for loss1, loss2 in zip(target_losses_z, ref_losses_z):
+    #     if target_loss / loss1 * loss2 / target_ref < args['gamma']:
+    #         num_z_dominated_it += 1
 
-    # Ratio of log ppl of lower-case and normal-case
-    pred["log_ppl/log_lower_ppl"] = (np.log(p_target) / np.log(p_lower)).item()
-    # Ratio of log ppl of large and zlib
-    zlib_entropy = len(zlib.compress(bytes(text, 'utf-8')))
-    pred["log_ppl/zlib"] = np.log(p_target)/zlib_entropy
-    # token mean and var
-    # pred["mean"] = -np.mean(all_prob).item()
-    # pred["var"] = np.var(all_prob).item()
+    threshold = args['gamma'] / target_loss * target_ref 
+    num_z_dominated = torch.searchsorted(rmia_losses, threshold).item()
+    pred["RMIA"] = 1 - num_z_dominated / len(rmia_losses)
+    # print(pred['RMIA'])
+    # if num_z_dominated_it != num_z_dominated:
+    #     print(f"num_z_dominated = {num_z_dominated}")
+    #     print(f"num_z_dominated_it = {num_z_dominated_it}")
+    #     print(f"threshold = {threshold}")
+    #     print(f"rmia_losses = {rmia_losses}")
     
-    ex["pred"] = pred
-    return ex
+    return pred
 
 def evaluate_model(model, tokenizer, dl):
     val_bar = tqdm(range(len(dl)))
@@ -113,19 +101,26 @@ def evaluate_model(model, tokenizer, dl):
     #     losses.append(outputs.loss)
     return losses
 
-def evaluate_data(test_data, rmia_data, model1, model2, tokenizer1, tokenizer2, col_name, args):
-    rmia_dl = DataLoader(rmia_data, batch_size=32, shuffle=False)
-    losses1 = evaluate_model(model1, tokenizer1, rmia_dl)
-    losses2 = evaluate_model(model2, tokenizer2, rmia_dl)
+def jsonl_to_dl(test_data):
+    test_json = json.dumps(test_data)
+    test_df = pd.read_json(io.StringIO(test_json))['input']
+    test_l = test_df.astype(str).tolist()
+    return DataLoader(test_l, batch_size=32, shuffle=False)
 
-    print(f'losses1[:10] = {losses1[:10]}')
-    print(f'len(losses1) = {len(losses1)}')
-    print(f'losses2[:10] = {losses2[:10]}')
-    print(f'len(losses2) = {len(losses2)}')
+def mia(test_data, rmia_data, target_model, ref_model, tokenizer1, tokenizer2, args):
+    rmia_dl = DataLoader(rmia_data, batch_size=32, shuffle=False)
+    target_losses_z = evaluate_model(target_model, tokenizer1, rmia_dl)
+    ref_losses_z = evaluate_model(ref_model, tokenizer2, rmia_dl)
+
+    test_dl = jsonl_to_dl(test_data) 
+    target_losses = evaluate_model(target_model, tokenizer1, test_dl)
+    ref_losses = evaluate_model(ref_model, tokenizer2, test_dl)
+
     all_output = []
-    for ex in tqdm(test_data): # [:100]
-        text = ex[col_name]
-        new_ex = inference(model1, model2, tokenizer1, tokenizer2, text, ex, losses1, losses2, args)
+    for i in tqdm(range(len(test_data))): # [:100]
+        pred = compute_decision(target_losses[i], ref_losses[i], target_losses_z, ref_losses_z, args)
+        new_ex = test_data[i].copy()
+        new_ex['pred'] = pred
         all_output.append(new_ex)
     return all_output
 
@@ -146,7 +141,7 @@ def get_cli_args():
 if __name__ == '__main__':
     args = get_cli_args()
 
-    model1, model2, tokenizer1, tokenizer2 = load_model('gpt2', 'gpt2', target_path=args['target_path'], ref_path=args['ref_path'])
+    target_model, ref_model, tokenizer1, tokenizer2 = load_model('gpt2', 'gpt2', target_path=args['target_path'], ref_path=args['ref_path'])
     
     # output path
     name1 = get_name(args['target_path'])
@@ -159,18 +154,18 @@ if __name__ == '__main__':
     # input path
     input_path = f"data/newsSpace_oracle_tiny.jsonl"
     args['input_path'] = input_path
-    data = load_jsonl(input_path)
+    test_data = load_jsonl(input_path)
 
     # RMIA data
     rmia_path = 'data/newsSpace_oracle_val.csv'
     args['rmia_path'] = rmia_path
-    df = pd.read_csv(rmia_path, names=['id', 'category', 'text'], header=0, index_col='id', encoding='utf-8')
-    rmia_data = df['text'].astype(str).to_list()[:args['num_z']]
+    rmia_data = pd.read_csv(rmia_path, names=['id', 'category', 'text'], header=0,  encoding='utf-8')['text'][:args['num_z']]
+    rmia_data = rmia_data.astype(str).tolist()
 
     with open(output_dir + '/args.json', mode='w') as f:
         json.dump(args, f)
 
-    all_output = evaluate_data(data, rmia_data, model1, model2, tokenizer1, tokenizer2, 'input', args)
+    all_output = mia(test_data, rmia_data, target_model, ref_model, tokenizer1, tokenizer2, args)
     '''
     dump and read data 
     '''

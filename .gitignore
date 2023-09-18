@@ -4,6 +4,6 @@ output
 data
 checkpoints
 .ipynb_checkpoints
-mia.ipynb
+*.ipynb
 test.py
 *__pycache__
