@@ -17,9 +17,12 @@ echo "--------------------"
 source ~/.bashrc
 conda activate mia
 
-srun python src/MIA/MIA_llama.py --target_path=checkpoints/gpt2/run_5/epoch-3_perplexity-20.9533 --ref_path=checkpoints/gpt2/run_2/epoch-4_perplexity-20.8704 --gamma=1 --num_z=6000
-# srun python src/detectGPT.py
-# srun python src/train.    py --train_path=data/newsSpace_other_ref_train.csv --val_path=data/newsSpace_oracle_val.csv
+# Target paths
+# target_path=checkpoints/gpt2/run_5/epoch-0_perplexity-23.6118
+# target_path=checkpoints/gpt2/run_5/epoch-3_perplexity-20.9533
+
+srun python src/MIA/MIA_llama.py --target_path=checkpoints/gpt2/run_5/epoch-3_perplexity-20.9533 --gamma=1 --num_z=6000
+# srun python src/train.py --train_path=data/newsSpace_other_ref_train.csv --val_path=data/newsSpace_oracle_val.csv
 
 # srun conda env update -f environment.yml
 # srun jupyter-lab

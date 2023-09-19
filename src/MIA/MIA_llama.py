@@ -40,6 +40,10 @@ def calculatePerplexity(sentence, model, tokenizer, gpu):
         all_prob.append(probability)
     return torch.exp(loss).item(), all_prob
 
+def RMIA_score(gamma, target_loss, target_ref, rmia_losses):
+    threshold = gamma / target_loss * target_ref 
+    num_z_dominated = torch.searchsorted(rmia_losses, threshold).item()
+    return 1 - num_z_dominated / len(rmia_losses)
 
 def compute_decision(target_loss, target_ref, target_losses_z, ref_losses_z, args):
     pred = {}
@@ -53,21 +57,12 @@ def compute_decision(target_loss, target_ref, target_losses_z, ref_losses_z, arg
     rmia_losses = ref_losses_z / target_losses_z 
     rmia_losses = torch.sort(rmia_losses)[0]
 
-    # num_z_dominated_it = 0
-    # for loss1, loss2 in zip(target_losses_z, ref_losses_z):
-    #     if target_loss / loss1 * loss2 / target_ref < args['gamma']:
-    #         num_z_dominated_it += 1
-
-    threshold = args['gamma'] / target_loss * target_ref 
-    num_z_dominated = torch.searchsorted(rmia_losses, threshold).item()
-    pred["RMIA"] = 1 - num_z_dominated / len(rmia_losses)
-    # print(pred['RMIA'])
-    # if num_z_dominated_it != num_z_dominated:
-    #     print(f"num_z_dominated = {num_z_dominated}")
-    #     print(f"num_z_dominated_it = {num_z_dominated_it}")
-    #     print(f"threshold = {threshold}")
-    #     print(f"rmia_losses = {rmia_losses}")
-    
+    if args['gamma'] == -1:
+        for gamma in np.arange(0.5, 1.35, 0.05):
+            pred[f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, target_ref, rmia_losses)
+    else:
+        gamma = args['gamma']
+        pred[f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, target_ref, rmia_losses)
     return pred
 
 def evaluate_model(model, tokenizer, dl):
@@ -131,10 +126,10 @@ def get_name(path):
 
 def get_cli_args():
     parser = ArgumentParser()
-    parser.add_argument('--gamma', type=float, default=0.75)
+    parser.add_argument('--gamma', type=float, default=1)
     parser.add_argument('--target_path', type=str, required=True)
     parser.add_argument('--ref_path', type=str, default=None)
-    parser.add_argument('--num_z', type=int, default = 100)
+    parser.add_argument('--num_z', type=int, default = 6000)
     args = parser.parse_args()
     return vars(args)
 
