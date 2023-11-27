@@ -241,7 +241,7 @@ def get_cli_args():
     parser.add_argument('-online', action='store_true', help="Use online RMIA")
     parser.add_argument('--input_path', type=str, default='data/newsSpace_oracle_tiny.jsonl', help="Path to the dataset")
     parser.add_argument('--z_sampling', type=str, help="Method to sample neighbors. Use 'prefix' to generate neighbors from a prefix of the input.")
-    parser.add_argument('--prefix_length', type=float, default=0.2, help="Length of the prefix to generate neighbors from, as a fraction of the input length.")
+    parser.add_argument('--prefix_length', type=float, default=0.1, help="Length of the prefix to generate neighbors from, as a fraction of the input length.")
     parser.add_argument('-ref_z', action='store_true', help="Generate neighbors from the reference model instead of the target model")
     parser.add_argument('-contrastive_dec', action='store_true', help="Use contrastive decoding when generating neighbors")
     parser.add_argument('--description', type=str, help="Notes to add to this run (all the arguments get dumped into the output)")

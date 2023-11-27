@@ -1,7 +1,9 @@
 slurm*
 __MACOSX
 output
-data
+data/*
+!data/newsSpace_oracle_debug.jsonl
+!data/newsSpace_oracle_tiny.jsonl 
 checkpoints
 .ipynb_checkpoints
 *.ipynb

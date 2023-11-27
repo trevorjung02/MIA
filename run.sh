@@ -24,7 +24,7 @@ conda activate mia
 # Ref models
 # ref_model=EleutherAI/pythia-1b-deduped
 
-srun python src/MIA/MIA_llama.py --target_path=checkpoints/gpt2/run_5/epoch-3_perplexity-20.9533 --ref_model=gpt2 --gamma=-1 --num_z=100 --input_path=data/newsSpace_oracle_debug.jsonl -online --z_sampling=prefix --prefix_length=0.1 -contrastive_dec -ref_z
+srun python src/MIA/MIA_llama.py --target_path=checkpoints/gpt2/run_5/epoch-3_perplexity-20.9533 --gamma=-1 --num_z=100 --input_path=data/newsSpace_oracle_debug.jsonl -online --z_sampling=prefix --prefix_length=0.1 -contrastive_dec -ref_z
 # srun python src/train.py --train_path=data/newsSpace_other_ref_train.csv --val_path=data/newsSpace_oracle_val.csv
 
 # srun conda env update -f environment.yml
