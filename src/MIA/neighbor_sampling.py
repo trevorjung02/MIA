@@ -1,6 +1,8 @@
 import torch
 from heapq import nlargest
 import math
+from transformers import LogitsWarper, LogitsProcessorList, LogitsProcessor
+import copy
 
 def get_alt_text(original_text, decoded_alt_text):
     lower_text = original_text.lower()
@@ -92,7 +94,8 @@ def sample_generation(sentence, model, tokenizer, args):
     input_ids = torch.tensor(tokenizer.encode(prefix)).unsqueeze(0)
     input_ids = input_ids.to(model.device)
     # print(input_ids)
-    output = model.generate(input_ids, max_new_tokens=len(sentence.split())-half_sentence_index, num_return_sequences=args['num_z'], pad_token_id=tokenizer.eos_token_id, **args['generate_args'])
+
+    output = model.generate(input_ids, max_new_tokens=len(sentence.split())-half_sentence_index, min_new_tokens=1, num_return_sequences=args['num_z'], pad_token_id=tokenizer.eos_token_id, **args['generate_args'])
     # print(output)
     complete_generated_text = tokenizer.batch_decode(output, skip_special_tokens=True)
     # print(complete_generated_text)
@@ -100,3 +103,51 @@ def sample_generation(sentence, model, tokenizer, args):
     # generated_text = tokenizer.batch_decode(output[:, len(input_ids[0]):], skip_special_tokens=True)
     # print(generated_text)
     return complete_generated_text
+
+class ContrastiveDecodingLogitsProcessor(LogitsProcessor):
+    def __init__(self, amateur, alpha) -> None:
+        self.amateur = amateur
+        self.input_ids = torch.empty(1).to(amateur.device)
+        self.past_key_values = None
+        self.alpha = alpha
+
+    def __call__(self, input_ids, scores):            
+        # print(f"input_ids size = {input_ids.size()}")
+        with torch.no_grad():
+            if torch.equal(self.input_ids, input_ids[:,:-1]):
+                amateur_out = self.amateur(input_ids[:,-1].unsqueeze(dim=1), return_dict=True, past_key_values = self.past_key_values, use_cache=True)
+            else:
+                amateur_out = self.amateur(input_ids, return_dict=True, use_cache=True)
+        self.input_ids = input_ids
+        self.past_key_values = amateur_out.past_key_values
+        # print((self.past_key_values[0][0].size()))
+        # print(amateur_out.logits.size())
+        return scores - self.alpha * (amateur_out.logits[:,-1,:])
+    
+class PlausabilityLogitsProcessor(LogitsProcessor):
+    def __init__(self, alpha: float, filter_value: float = -float("Inf"), min_tokens_to_keep: int = 1):
+        alpha = float(alpha)
+        if alpha <= 0 or alpha >= 1:
+            raise ValueError(f"`alpha` has to be a float > 0 and < 1, but is {alpha}")
+
+        min_tokens_to_keep = int(min_tokens_to_keep)
+        if min_tokens_to_keep < 1:
+            raise ValueError(
+                f"`min_tokens_to_keep` has to be a strictly positive integer, but is {min_tokens_to_keep}"
+            )
+
+        self.alpha = torch.tensor(alpha)
+        self.filter_value = filter_value
+        self.min_tokens_to_keep = min_tokens_to_keep
+        
+    def __call__(self, input_ids, scores) -> torch.FloatTensor:
+        # Calculate the adaptive cutoff
+        probabilities = scores.softmax(dim=-1)
+        indices_to_remove = probabilities < self.alpha * torch.max(probabilities)
+
+        # Keep the words with the 'min_tokens_to_keep'-highest probabilities
+        top_k = min(self.min_tokens_to_keep, scores.size(-1))  # Safety check
+        indices_to_remove = indices_to_remove & (scores < torch.topk(scores, top_k)[0][..., -1, None])
+
+        scores = scores.masked_fill(indices_to_remove, self.filter_value)
+        return scores

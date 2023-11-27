@@ -1,10 +1,12 @@
 import json
 import random
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPTNeoXForCausalLM
 import torch
 from argparse import ArgumentParser
 import os
+import pandas as pd
+import io
 
 def create_new_dir(dir: str) -> str:
     if not os.path.exists(dir):
@@ -42,8 +44,15 @@ def load_model(target_name, ref_name, target_path=None, ref_path=None):
     if target_path:
         ckpt = torch.load(target_path)
         target_model.load_state_dict(ckpt['model_state_dict'])
+    target_model.config.pad_token_id = target_model.config.eos_token_id
+    target_model.generation_config.pad_token_id = target_model.config.eos_token_id
     
-    ref_model = AutoModelForCausalLM.from_pretrained(ref_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+    if "pythia" in ref_name:
+        ref_model = GPTNeoXForCausalLM.from_pretrained(ref_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+    else:
+        ref_model = AutoModelForCausalLM.from_pretrained(ref_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+        ref_model.config.pad_token_id = ref_model.config.eos_token_id
+        ref_model.generation_config.pad_token_id = ref_model.config.eos_token_id
     if ref_path:
         ckpt = torch.load(ref_path)
         ref_model.load_state_dict(ckpt['model_state_dict'])
@@ -56,3 +65,9 @@ def load_model(target_name, ref_name, target_path=None, ref_path=None):
     tokenizer2.pad_token = tokenizer2.eos_token
 
     return target_model, ref_model, tokenizer1, tokenizer2
+
+def jsonl_to_list(test_data):
+    test_json = json.dumps(test_data)
+    test_df = pd.read_json(io.StringIO(test_json))['input']
+    test_list = test_df.astype(str).tolist()
+    return test_list

@@ -52,7 +52,7 @@ def fig_fpr_tpr(all_output, output_dir):
             # print(metric)
             # print(predictions)
             legend, auc, acc, low = do_plot(predictions, answers, legend=metric, metric='auc', output_dir=output_dir)
-            f.write('%s   AUC %.4f, Accuracy %.4f, TPR@0.1%%FPR of %.4f\n'%(legend, auc, acc, low))
+            f.write('AUC %.4f, Accuracy %.4f, TPR@0.1%%FPR of %.4f | %s\n'%(auc, acc, low, legend))
 
     plt.semilogx()
     plt.semilogy()
