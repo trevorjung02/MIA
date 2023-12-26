@@ -17,11 +17,12 @@ from sklearn.metrics import auc, roc_curve
 from transformers import BertForMaskedLM, BertTokenizer, LogitsProcessorList
 from scipy.stats import norm
 import math
+import gc
 
 from plots import fig_fpr_tpr
 from load_utils import load_jsonl, load_model, read_jsonl, dump_jsonl, create_new_dir, jsonl_to_list
 from neighbor_sampling import generate_neighbors, sample_generation, ContrastiveDecodingLogitsProcessor, PlausabilityLogitsProcessor
-from utils import evaluate_model
+from utils import evaluate_model, get_idx_unreduced_loss
 
 def RMIA_score(gamma, target_loss, ref_loss, rmia_losses):
     r"""
@@ -39,7 +40,7 @@ def RMIA_score(gamma, target_loss, ref_loss, rmia_losses):
     num_z_dominated = torch.searchsorted(rmia_losses, threshold).item()
     return 1 - num_z_dominated / len(rmia_losses)
 
-def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, target_model, ref_model, tokenizer1, tokenizer2, args):
+def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, unreduced_loss, unreduced_loss_ref, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, args):
     r"""
     Calculate the RMIA score for an input x, as well as related metrics. 
 
@@ -60,23 +61,43 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, ta
     name = f"{args['generate_args']},prefix_len={prefix_lens} "
 
     neighbors = []
-    if args['ref_z']:
+    if generation_model: 
+        model_z = generation_model
+        if 'logits_processor' in args['generate_args']:
+            raise Exception("Contrastive decoding can't be used with a neutral generation model")
+    elif args['ref_z']:
         # Neighbors are generated from reference model
-        # If using contrastive deocoding, the amateur model is the target model
+        # If using contrastive decoding, the amateur model is the target model
         model_z = ref_model
         model_amateur = target_model
     else:
         # Neighbors are generated from target model
-        # If using contrastive deocoding, the amateur model is the reference model
+        # If using contrastive decoding, the amateur model is the reference model
         model_z = target_model
         model_amateur = ref_model
     
     # Generate neighbors
+    if args['adaptive_idx']:
+        indices = torch.argwhere(unreduced_loss - unreduced_loss_ref < -5)
+        if len(indices) > 0: 
+            idx = indices[-1]
+            tokens = target_tokenizer(text).input_ids
+            tokens = tokens[:idx+2]
+            adaptive_prefix_len = len(target_tokenizer.decode(tokens))
+        else:
+            adaptive_prefix_len = 0
+    else:
+        adaptive_prefix_len = 0
+    # print(unreduced_loss)
+    # print(idx)
+    # print(adaptive_prefix_len)
+
     for prefix_len in prefix_lens:
         # Generate neighbors using each prefix length
         # Configure the arguments for generation
         cur_args = copy.deepcopy(args)
         cur_args['prefix_length'] = prefix_len
+        cur_args['adaptive_prefix_length'] = adaptive_prefix_len
         cur_args['num_z'] = args['num_z'] // len(prefix_lens)
         # Need to create a new logit processor for each generation
         if 'logits_processor' in args['generate_args']:
@@ -88,11 +109,11 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, ta
                 PlausabilityLogitsProcessor(min_probability_ratio),
                 ContrastiveDecodingLogitsProcessor(model_amateur, contrastive_dec_alpha)
             ])
-        neighbors.extend(sample_generation(text, model_z, tokenizer1, cur_args))
+        neighbors.extend(sample_generation(text, model_z, target_tokenizer, cur_args))
     
     neighbors_dl = DataLoader(neighbors, batch_size=32, shuffle=False)
-    target_losses_z, target_variances_z = evaluate_model(target_model, tokenizer1, neighbors_dl)
-    ref_losses_z, ref_variances_z = evaluate_model(ref_model, tokenizer2, neighbors_dl)
+    target_losses_z, target_variances_z, _ = evaluate_model(target_model, target_tokenizer, neighbors_dl)
+    ref_losses_z, ref_variances_z, _ = evaluate_model(ref_model, ref_tokenizer, neighbors_dl)
 
     # Count fraction of z that x has higher loss than for the target model
     ratio = torch.count_nonzero(target_losses_z < target_loss).item() / len(target_losses_z)
@@ -119,12 +140,13 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, ta
     rmia_vars = torch.sort(rmia_vars)[0]
 
     if args['gamma'] == -1:
-        for gamma in np.arange(0.7, 1.5, 0.05):
+        for gamma in np.arange(0.5, 1.5, 0.05):
             # Try different gammas
             # RMIA attack using loss 
+            gamma = np.round(gamma, 2)
             res[name + f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, ref_loss, rmia_losses)
             # RMIA attack using variance
-            res[name + f"RMIA_var(gamma={gamma})"] = RMIA_score(gamma, target_variance, ref_variance, rmia_vars)
+            # res[name + f"RMIA_var(gamma={gamma})"] = RMIA_score(gamma, target_variance, ref_variance, rmia_vars)
     else:
         gamma = args['gamma']
         res[name + f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, ref_loss, rmia_losses)
@@ -154,30 +176,30 @@ def compute_decision_offline(target_loss, ref_loss, target_losses_z, ref_losses_
         pred[f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, ref_loss, rmia_losses)
     return pred
 
-def compute_decision_online(text, target_loss, ref_loss, target_variance, ref_variance, target_model, ref_model, tokenizer1, tokenizer2, search_model, search_tokenizer, args):
+def compute_decision_online(text, target_loss, ref_loss, target_variance, ref_variance, unreduced_loss, unreduced_loss_ref, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, search_model, search_tokenizer, args):
     # Do all the MIA attacks, and use the online version of RMIA 
-
+    torch.cuda.empty_cache()
     print(f"text = {text}")
     pred = {}
 
-    zlib_entropy = len(zlib.compress(bytes(text, 'utf-8')))
+    # zlib_entropy = len(zlib.compress(bytes(text, 'utf-8')))
 
     # Loss attack
     pred["loss"] = target_loss.item()
     # Loss attack with entropy 
-    pred["loss/zlib"] = (target_loss / zlib_entropy).item()
+    # pred["loss/zlib"] = (target_loss / zlib_entropy).item()
     # Reference attack
     pred["loss/ref_loss"] = (target_loss/ref_loss).item()
     # Reference attack with entropy
-    pred["loss/ref_loss / zlib"] = (target_loss/(ref_loss * zlib_entropy)).item()
+    # pred["loss/ref_loss / zlib"] = (target_loss/(ref_loss * zlib_entropy)).item()
     # Variance attack
-    pred["variance"] = target_variance.item()
-    # Variance attack with entropy
-    pred["variance/zlib"] = (target_variance / zlib_entropy).item()
-    # Reference variance attack
-    pred["variance/ref_variance"] = (target_variance / ref_variance).item()
-    # Reference variance attack with entropy
-    pred["variance/ref_variance / zlib"] = (target_variance / (ref_variance * zlib_entropy)).item()
+    # pred["variance"] = target_variance.item()
+    # # Variance attack with entropy
+    # pred["variance/zlib"] = (target_variance / zlib_entropy).item()
+    # # Reference variance attack
+    # pred["variance/ref_variance"] = (target_variance / ref_variance).item()
+    # # Reference variance attack with entropy
+    # pred["variance/ref_variance / zlib"] = (target_variance / (ref_variance * zlib_entropy)).item()
 
     if args['z_sampling'] == 'BERT_normalized':
         # Sample z with BERT
@@ -185,24 +207,25 @@ def compute_decision_online(text, target_loss, ref_loss, target_variance, ref_va
     elif args['z_sampling'] == 'prefix':
         # Sample z by generating from prefix
         generate_args = [{'do_sample': True}]
-        for contrastive_dec_alpha in [1, 0.5, 1.5]:
-            generate_args.append({'do_sample': True, 'logits_processor': True, 'contrastive_dec_alpha': 1, 'min_prob_ratio': 0.01})
+        if args["contrastive_dec"]:
+            for contrastive_dec_alpha in [1]:
+                generate_args.append({'do_sample': True, 'logits_processor': True, 'contrastive_dec_alpha': contrastive_dec_alpha, 'min_prob_ratio': 0.01})
         for arg in generate_args:
             cur_args = copy.deepcopy(args)
             cur_args['generate_args'] = arg
-            res = evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, target_model, ref_model, tokenizer1, tokenizer2, cur_args)
+            res = evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, unreduced_loss, unreduced_loss_ref, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, cur_args)
             pred.update(res)
     else:
         print("ERROR: No z_sampling method specified for online MIA attack")
     
     return pred
 
-def mia(test_data, rmia_data, target_model, ref_model, tokenizer1, tokenizer2, args):
+def mia(test_data, rmia_data, target_model, ref_model, generation_model,target_tokenizer, ref_tokenizer, generation_tokenizer, args):
     if rmia_data:
         print("Running offline RMIA")
         rmia_dl = DataLoader(rmia_data, batch_size=32, shuffle=False)
-        target_losses_z, target_variances_z = evaluate_model(target_model, tokenizer1, rmia_dl)
-        ref_losses_z, ref_variances_z = evaluate_model(ref_model, tokenizer2, rmia_dl)
+        target_losses_z, target_variances_z, _ = evaluate_model(target_model, target_tokenizer, rmia_dl)
+        ref_losses_z, ref_variances_z, _ = evaluate_model(ref_model, ref_tokenizer, rmia_dl)
     else:
         print("Running online RMIA")
         CACHE_DIR = '/mmfs1/gscratch/ark/tjung2/continual-knowledge-learning/huggingface'
@@ -211,15 +234,19 @@ def mia(test_data, rmia_data, target_model, ref_model, tokenizer1, tokenizer2, a
 
     test_list = jsonl_to_list(test_data)
     test_dl = DataLoader(test_list, batch_size=32, shuffle=False)
-    target_losses, target_variances = evaluate_model(target_model, tokenizer1, test_dl) 
-    ref_losses, ref_variances = evaluate_model(ref_model, tokenizer2, test_dl)
+    target_losses, target_variances, unreduced_losses = evaluate_model(target_model, target_tokenizer, test_dl) 
+    ref_losses, ref_variances, unreduced_losses_ref = evaluate_model(ref_model, ref_tokenizer, test_dl)
 
     all_output = []
     for i in tqdm(range(len(test_data))): # [:100]
+        if i % 50 == 0:
+            gc.collect()
         if rmia_data:
             pred = compute_decision_offline(target_losses[i], ref_losses[i], target_losses_z, ref_losses_z, args)
         else:
-            pred = compute_decision_online(test_list[i], target_losses[i], ref_losses[i], target_variances[i], ref_variances[i], target_model, ref_model, tokenizer1, tokenizer2, search_model, search_tokenizer, args)
+            pred = compute_decision_online(test_list[i], target_losses[i], ref_losses[i], target_variances[i], ref_variances[i], 
+            get_idx_unreduced_loss(unreduced_losses, i), 
+            get_idx_unreduced_loss(unreduced_losses_ref, i), target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, search_model, search_tokenizer, args)
         new_ex = test_data[i].copy()
         new_ex['pred'] = pred
         all_output.append(new_ex)
@@ -236,6 +263,8 @@ def get_cli_args():
     parser.add_argument('--target_path', type=str, required=True, help="Checkpoint path for the target model")
     parser.add_argument('--target_model', type=str, default='gpt2', help="Model name of the target model, gpt2 by default")
     parser.add_argument('--ref_path', type=str, default=None, help="Checkpoint path for the reference model (optional)")
+    parser.add_argument('--generation_model', type=str, default=None, help="Model to generate neighbors")
+    parser.add_argument('--generation_path', type=str, default=None, help="Checkpoint path for the generation model (optional)")
     parser.add_argument('--ref_model', type=str, default='gpt2', help="Model name of the reference model, gpt2 by default")
     parser.add_argument('--num_z', type=int, default = 100, help="Number of neighbors to generate for each input")
     parser.add_argument('-online', action='store_true', help="Use online RMIA")
@@ -244,14 +273,22 @@ def get_cli_args():
     parser.add_argument('--prefix_length', type=float, default=0.1, help="Length of the prefix to generate neighbors from, as a fraction of the input length.")
     parser.add_argument('-ref_z', action='store_true', help="Generate neighbors from the reference model instead of the target model")
     parser.add_argument('-contrastive_dec', action='store_true', help="Use contrastive decoding when generating neighbors")
+    parser.add_argument('-adaptive_idx', action='store_true', help="Adaptively determine prefix len to include rightmost token where target model significantly outperforms ref model")
     parser.add_argument('--description', type=str, help="Notes to add to this run (all the arguments get dumped into the output)")
+    parser.add_argument('-perturb', action='store_true', help="Generate neighbors by perturbing input sentence")
+    parser.add_argument('--idx_frac', type=float, help="Maximum fraction of indices to perturb")
     args = parser.parse_args()
     return vars(args)
 
 if __name__ == '__main__':
     args = get_cli_args()
 
-    target_model, ref_model, tokenizer1, tokenizer2 = load_model(args['target_model'], args['ref_model'], target_path=args['target_path'], ref_path=args['ref_path'])
+    target_model, target_tokenizer, = load_model(args['target_model'], path=args['target_path'])
+    ref_model, ref_tokenizer, = load_model(args['ref_model'], path=args['ref_path'])
+    if args['generation_model']:
+        generation_model, generation_tokenizer, = load_model(args['generation_model'], path=args['generation_path'])
+    else:
+        generation_model = generation_tokenizer = None
     
     # output path
     name1 = get_name(args['target_path'])
@@ -276,7 +313,7 @@ if __name__ == '__main__':
     with open(output_dir + '/args.json', mode='w') as f:
         json.dump(args, f)
 
-    all_output = mia(test_data, rmia_data, target_model, ref_model, tokenizer1, tokenizer2, args)
+    all_output = mia(test_data, rmia_data, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, args)
     '''
     dump and read data 
     '''

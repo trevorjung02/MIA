@@ -37,34 +37,31 @@ def read_jsonl(path):
     with open(path, 'r') as f:
         return [json.loads(line) for line in tqdm(f)]
     
-def load_model(target_name, ref_name, target_path=None, ref_path=None):
+def load_model(name, path=None):
     CACHE_DIR = '/mmfs1/gscratch/ark/tjung2/continual-knowledge-learning/huggingface'
-    
-    target_model = AutoModelForCausalLM.from_pretrained(target_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
-    if target_path:
-        ckpt = torch.load(target_path)
-        target_model.load_state_dict(ckpt['model_state_dict'])
-    target_model.config.pad_token_id = target_model.config.eos_token_id
-    target_model.generation_config.pad_token_id = target_model.config.eos_token_id
-    
-    if "pythia" in ref_name:
-        ref_model = GPTNeoXForCausalLM.from_pretrained(ref_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+
+    if "pythia" in name:
+        model = GPTNeoXForCausalLM.from_pretrained(name, return_dict=True, 
+        cache_dir=CACHE_DIR).cuda()
     else:
-        ref_model = AutoModelForCausalLM.from_pretrained(ref_name, return_dict=True, cache_dir=CACHE_DIR).cuda()
-        ref_model.config.pad_token_id = ref_model.config.eos_token_id
-        ref_model.generation_config.pad_token_id = ref_model.config.eos_token_id
-    if ref_path:
-        ckpt = torch.load(ref_path)
-        ref_model.load_state_dict(ckpt['model_state_dict'])
+        if "gpt2" in name:
+            model = AutoModelForCausalLM.from_pretrained(name, return_dict=True, cache_dir=CACHE_DIR).cuda()
+            model.config.pad_token_id = model.config.eos_token_id
+            model.generation_config.pad_token_id = model.config.eos_token_id
+        else:
+            model = AutoModelForCausalLM.from_pretrained(name, return_dict=True, cache_dir=CACHE_DIR, 
+            device_map='auto',
+            load_in_8bit=True)
+    
+    if path:
+        ckpt = torch.load(path)
+        model.load_state_dict(ckpt['model_state_dict'])
 
-    target_model.eval()
-    ref_model.eval()
-    tokenizer1 = AutoTokenizer.from_pretrained(target_name)
-    tokenizer1.pad_token = tokenizer1.eos_token
-    tokenizer2 = AutoTokenizer.from_pretrained(target_name)
-    tokenizer2.pad_token = tokenizer2.eos_token
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    tokenizer.pad_token = tokenizer.eos_token
 
-    return target_model, ref_model, tokenizer1, tokenizer2
+    return model, tokenizer
 
 def jsonl_to_list(test_data):
     test_json = json.dumps(test_data)

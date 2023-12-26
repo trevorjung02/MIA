@@ -3,6 +3,7 @@ from heapq import nlargest
 import math
 from transformers import LogitsWarper, LogitsProcessorList, LogitsProcessor
 import copy
+import numpy as np
 
 def get_alt_text(original_text, decoded_alt_text):
     lower_text = original_text.lower()
@@ -81,27 +82,50 @@ def generate_neighbors(text, max_neighbors, search_model, search_tokenizer):
         return highest_scored_texts
     
 def sample_generation(sentence, model, tokenizer, args):
-    half_sentence_index = math.ceil(len(sentence.split())*args['prefix_length'])
-    # half_sentence_index = 8
-    if half_sentence_index > 0:
-        prefix = " ".join(sentence.split()[:half_sentence_index])
+    if args['perturb']:
+        print(f"Generating samples from perturbation, with idx_frac = {args['idx_frac']}")
+        with torch.no_grad():
+            input_ids = torch.tensor(tokenizer.encode(sentence)).unsqueeze(0)
+            input_ids = input_ids.to(model.device)
+            logits = model(input_ids).logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)[0][:-1]
+            neighbors = []
+            
+            for _ in range(args['num_z']):
+                neighbor = input_ids[0].clone()
+                num_replacements = max(np.random.randint(0, int(args['idx_frac'] * len(probs)+1), 1), 1)
+                # num_replacements = max(int(0.2 * len(probs)+1), 1)
+                indices = np.random.choice(len(probs), num_replacements, replace=False)
+                for idx in indices:
+                    tokens = torch.multinomial(probs[idx], 1, replacement=True)
+                    neighbor[idx+1] = tokens[0]
+                neighbors.append(neighbor)
+            complete_generated_text = tokenizer.batch_decode(neighbors, skip_special_tokens=True)
     else:
-        prefix = '<|startoftext|> '
-    # continuation = " ".join(sentence.split()[half_sentence_index:])
-    # print(prefix)
-    # print(continuation)
-    
-    input_ids = torch.tensor(tokenizer.encode(prefix)).unsqueeze(0)
-    input_ids = input_ids.to(model.device)
-    # print(input_ids)
+        print(f"Generating samples from {model.name_or_path}")
+        half_sentence_index = math.ceil(len(sentence.split())*args['prefix_length'])
+        if args['adaptive_prefix_length'] < len(sentence.split())-1 and args['adaptive_prefix_length'] > half_sentence_index:
+            half_sentence_index = args['adaptive_prefix_length']
+        # half_sentence_index = 8
+        if half_sentence_index > 0:
+            prefix = " ".join(sentence.split()[:half_sentence_index])
+        else:
+            prefix = '<|startoftext|> '
+        # continuation = " ".join(sentence.split()[half_sentence_index:])
+        print(f"Generating from prefix {prefix}")
+        # print(continuation)
+        
+        input_ids = torch.tensor(tokenizer.encode(prefix)).unsqueeze(0)
+        input_ids = input_ids.to(model.device)
+        # print(input_ids)
 
-    output = model.generate(input_ids, max_new_tokens=len(sentence.split())-half_sentence_index, min_new_tokens=1, num_return_sequences=args['num_z'], pad_token_id=tokenizer.eos_token_id, **args['generate_args'])
-    # print(output)
-    complete_generated_text = tokenizer.batch_decode(output, skip_special_tokens=True)
-    # print(complete_generated_text)
-    # generated_text = complete_generated_text[:, len(prefix):]
-    # generated_text = tokenizer.batch_decode(output[:, len(input_ids[0]):], skip_special_tokens=True)
-    # print(generated_text)
+        output = model.generate(input_ids, max_new_tokens=len(sentence.split())-half_sentence_index, min_new_tokens=1, num_return_sequences=args['num_z'], pad_token_id=tokenizer.eos_token_id, **args['generate_args'])
+        # print(output)
+        complete_generated_text = tokenizer.batch_decode(output, skip_special_tokens=True)
+        # print(complete_generated_text)
+        # generated_text = complete_generated_text[:, len(prefix):]
+        # generated_text = tokenizer.batch_decode(output[:, len(input_ids[0]):], skip_special_tokens=True)
+        # print(generated_text)
     return complete_generated_text
 
 class ContrastiveDecodingLogitsProcessor(LogitsProcessor):
