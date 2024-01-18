@@ -1,3 +1,4 @@
+import token
 import torch
 from heapq import nlargest
 import math
@@ -80,30 +81,109 @@ def generate_neighbors(text, max_neighbors, search_model, search_tokenizer):
     
         highest_scored_texts = nlargest(max_neighbors, candidate_scores, key = candidate_scores.get)
         return highest_scored_texts
-    
+
+def get_indices_span(idx_frac, num_tokens, fixed):
+    if fixed:
+        total_perturbations = max(math.ceil(idx_frac * num_tokens), 1)
+    else:
+        total_perturbations = max(np.random.randint(0, math.ceil(idx_frac * num_tokens), 1)[0], 1)
+    indices = set()
+    while len(indices) < total_perturbations:
+        num_replacements = np.random.default_rng().geometric(p=0.5, size=1)[0]
+        # print(num_replacements)
+        num_replacements = np.maximum(num_replacements, 1)
+        num_replacements = np.minimum(num_replacements, total_perturbations-len(indices))
+        # print(num_replacements)
+        start_index = np.random.choice(num_tokens, 1, replace=False)[0]
+        # print(start_index)
+        for idx in range(start_index, min(start_index+num_replacements, num_tokens)):
+            indices.add(idx)
+    return list(indices)
+
+def get_indices_individual(idx_frac, num_tokens, fixed):
+    if fixed:
+        num_replacements = max(math.ceil(idx_frac * num_tokens), 1)
+    else:
+        num_replacements = max(np.random.randint(0, math.ceil(idx_frac * num_tokens)), 1)
+    # num_replacements = max(int(0.2 * num_tokens+1), 1)
+    indices = np.random.choice(num_tokens, num_replacements, replace=False)
+    return indices
+
+def generate_perturbation(input_ids, model, indices):
+    indices.sort()
+    cache = None
+    cur_replaced_indices = []
+    with torch.no_grad():
+        output_tokens = input_ids[0].clone()
+        for i in range(len(indices)):
+            # print(i)
+            if indices[i] == 0:
+                continue
+            if i == 0:
+                left = 0
+            else:
+                left = indices[i-1]+1
+            # print(f"{left}:{indices[i]}")
+            input = output_tokens[left:indices[i]+1]
+            if cache:
+                args = {
+                    'past_key_values': cache
+                }
+            else:
+                args = {}
+            output = model(input.unsqueeze(dim=0), use_cache=True, return_dict=True, **args)
+            cache = output.past_key_values
+            probs = torch.nn.functional.softmax(output.logits[0][-1], dim=-1)
+            token = torch.multinomial(probs, 1, replacement=True)
+            
+            if output_tokens[indices[i]+1] != token:
+                output_tokens[indices[i]+1] = token
+                cur_replaced_indices.append(indices[i])
+
+            # output_tokens[indices[i]] = torch.multinomial(probs, 1, replacement=True)
+        return output_tokens, cur_replaced_indices
+
+
 def sample_generation(sentence, model, tokenizer, args):
-    if args['perturb']:
+    if args['z_sampling'] == 'perturb':
         print(f"Generating samples from perturbation, with idx_frac = {args['idx_frac']}")
         with torch.no_grad():
             input_ids = torch.tensor(tokenizer.encode(sentence)).unsqueeze(0)
             input_ids = input_ids.to(model.device)
-            logits = model(input_ids).logits
-            probs = torch.nn.functional.softmax(logits, dim=-1)[0][:-1]
-            neighbors = []
+            logits = model(input_ids).logits[0][:-1]
+
+            # for i in range(len(logits)):
+            #     logits[i][input_ids[0][i+1]] = -float("Inf")
+                
+            probs = torch.nn.functional.softmax(logits, dim=-1)
             
+            # for i in range(len(probs)):
+            #     probs[i][input_ids[0][i+1]] = 0
+
+            neighbors = []
+            replaced_indices = []
             for _ in range(args['num_z']):
-                neighbor = input_ids[0].clone()
-                num_replacements = max(np.random.randint(0, int(args['idx_frac'] * len(probs)+1), 1), 1)
-                # num_replacements = max(int(0.2 * len(probs)+1), 1)
-                indices = np.random.choice(len(probs), num_replacements, replace=False)
-                for idx in indices:
-                    tokens = torch.multinomial(probs[idx], 1, replacement=True)
-                    neighbor[idx+1] = tokens[0]
+                if args['perturb_span']:
+                    indices = get_indices_span(args['idx_frac'], len(probs), args['fixed'])
+                else:
+                    indices = get_indices_individual(args['idx_frac'], len(probs), args['fixed'])
+                if args['perturb_generation']:
+                    neighbor, cur_replaced_indices = generate_perturbation(input_ids, model, indices)
+                else:
+                    neighbor = input_ids[0].clone()
+                    cur_replaced_indices = []
+                    for idx in indices:
+                        tokens = torch.multinomial(probs[idx], 1, replacement=True)
+                        if neighbor[idx+1] != tokens[0]:
+                            neighbor[idx+1] = tokens[0]
+                            cur_replaced_indices.append(idx)
                 neighbors.append(neighbor)
+                replaced_indices.append(cur_replaced_indices)
             complete_generated_text = tokenizer.batch_decode(neighbors, skip_special_tokens=True)
+            return complete_generated_text, replaced_indices
     else:
         print(f"Generating samples from {model.name_or_path}")
-        half_sentence_index = math.ceil(len(sentence.split())*args['prefix_length'])
+        half_sentence_index = math.ceil(len(sentence.split())*args['idx_frac'])
         if args['adaptive_prefix_length'] < len(sentence.split())-1 and args['adaptive_prefix_length'] > half_sentence_index:
             half_sentence_index = args['adaptive_prefix_length']
         # half_sentence_index = 8
@@ -126,7 +206,7 @@ def sample_generation(sentence, model, tokenizer, args):
         # generated_text = complete_generated_text[:, len(prefix):]
         # generated_text = tokenizer.batch_decode(output[:, len(input_ids[0]):], skip_special_tokens=True)
         # print(generated_text)
-    return complete_generated_text
+        return complete_generated_text
 
 class ContrastiveDecodingLogitsProcessor(LogitsProcessor):
     def __init__(self, amateur, alpha) -> None:
