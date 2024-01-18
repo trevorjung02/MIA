@@ -1,8 +1,8 @@
 # Basic Run with Prefix-generated z's
-python src/MIA/MIA_llama.py --target_path=<target model checkpoint> --gamma=-1 --num_z=100 --input_path=<dataset path> --z_sampling=prefix --idx_frac=0.1
+python src/MIA/MIA_llama.py --target_path=\<target model checkpoint\> --gamma=-1 --num_z=100 --input_path=\<dataset path\> --z_sampling=prefix --idx_frac=0.1
 
 # Run with Perturb-generated z's
-python src/MIA/MIA_llama.py --target_path=<target model checkpoint> --gamma=-1 --num_z=100 --input_path=<dataset path> --z_sampling=perturb --idx_frac=0.1
+python src/MIA/MIA_llama.py --target_path=\<target model checkpoint\> --gamma=-1 --num_z=100 --input_path=\<dataset path\> --z_sampling=perturb --idx_frac=0.1
 
 # Command Line Arguments 
 --z_sampling: set to 'prefix' or 'perturb' for diffferent z sampling methods \
