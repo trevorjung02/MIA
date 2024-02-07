@@ -1,5 +1,6 @@
 import logging
 from os import replace
+from weakref import ref
 from sympy import true
 logging.basicConfig(level='ERROR')
 import torch
@@ -25,7 +26,7 @@ import gc
 from plots import fig_fpr_tpr
 from load_utils import load_jsonl, load_model, read_jsonl, dump_jsonl, create_new_dir, jsonl_to_list
 from neighbor_sampling import generate_neighbors, sample_generation, ContrastiveDecodingLogitsProcessor, PlausabilityLogitsProcessor
-from utils import evaluate_model, get_idx_unreduced_loss, unzip_collate
+from utils import evaluate_model, get_idx_unreduced_loss, unzip_collate, ul
 
 def RMIA_score(gamma, target_loss, ref_loss, rmia_losses):
     r"""
@@ -60,23 +61,39 @@ def RMIA_score_original(gamma, target_loss, ref_loss, rmia_losses, replaced_indi
             num_z_dominated += 1
     return 1 - num_z_dominated / len(rmia_losses)
 
-def RMIA_score_replaced(gamma, target_loss, ref_loss, rmia_losses, replaced_indices):     
+def RMIA_score_replaced(gamma, target_loss_tokens_x, ref_loss_tokens_x, target_losses_tokens_z, ref_losses_tokens_z, replaced_indices, args):     
     num_z_dominated = 0 
+    num_z_dominated_no_perturb = 0
     for i in range(len(replaced_indices)):
-        unreduced_target_loss_replaced = torch.clone(target_loss)
-        unreduced_ref_loss_replaced = torch.clone(ref_loss)
-        for idx in range(len(unreduced_target_loss_replaced)):
-            if idx not in set(replaced_indices[i]):
-                unreduced_target_loss_replaced[idx] = 0
-                unreduced_ref_loss_replaced[idx] = 0
-        num_tokens_replaced = torch.sum(unreduced_target_loss_replaced != 0)
+        # unreduced_target_loss_replaced = torch.clone(target_loss)
+        # unreduced_ref_loss_replaced = torch.clone(ref_loss)
+        # for idx in range(len(unreduced_target_loss_replaced)):
+        #     if idx not in set(replaced_indices[i]):
+        #         unreduced_target_loss_replaced[idx] = 0
+        #         unreduced_ref_loss_replaced[idx] = 0
+        # num_tokens_replaced = torch.sum(unreduced_target_loss_replaced != 0)
 
-        target_loss_replaced = torch.sum(unreduced_target_loss_replaced) / num_tokens_replaced
-        ref_loss_replaced = torch.sum(unreduced_ref_loss_replaced) / num_tokens_replaced
+        # target_loss_replaced = torch.sum(unreduced_target_loss_replaced) / num_tokens_replaced
+        # ref_loss_replaced = torch.sum(unreduced_ref_loss_replaced) / num_tokens_replaced
+
+        if args['last_idx_only']:
+            loss_indices = sorted(replaced_indices[i])[-1:]
+        else:
+            loss_indices = replaced_indices[i]
+        target_x = torch.sum(target_loss_tokens_x[loss_indices])/len(loss_indices)
+        ref_x = torch.sum(ref_loss_tokens_x[loss_indices])/len(loss_indices)
         
-        if target_loss_replaced / ref_loss_replaced * rmia_losses[i] < gamma:
+        target_z = torch.sum(ul(target_losses_tokens_z, i)[loss_indices])/len(loss_indices)
+        ref_z = torch.sum(ul(ref_losses_tokens_z, i)[loss_indices])/len(loss_indices)
+        
+        if target_x / ref_x < gamma:
+            num_z_dominated_no_perturb += 1
+        if target_x / ref_x * ref_z / target_z < gamma:
             num_z_dominated += 1
-    return 1 - num_z_dominated / len(rmia_losses)
+    # print(num_z_dominated_no_perturb, num_z_dominated)
+    if args['no_perturbation']:
+        num_z_dominated = num_z_dominated_no_perturb
+    return 1 - num_z_dominated / len(replaced_indices)
 
 
 def RMIA_score_squared(gamma, target_loss, ref_loss, rmia_losses):
@@ -172,19 +189,41 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
         # else:
         #     cur_neighbors = sample_generation(text, model_z, target_tokenizer, cur_args)
         if cur_args['z_sampling'] == 'perturb':
+            if cur_args['top_k']:
+                cur_args['all_singles'] = True
+                cur_args['z_per_indices'] = 10
             cur_neighbors, cur_replaced_indices = sample_generation(text, model_z, target_tokenizer, cur_args)
             neighbors.extend(cur_neighbors)
             replaced_indices.extend(cur_replaced_indices)
         else:
             cur_neighbors = sample_generation(text, model_z, target_tokenizer, cur_args)
             neighbors.extend(cur_neighbors)
+
+    # if cur_args['top_k']:
+    #     neighbors_dl = DataLoader(list(zip(neighbors, replaced_indices)), batch_size=32, shuffle=False, collate_fn=unzip_collate)
+    #     target_losses_z, target_variances_z, target_losses_tokens_z, target_losses_z_original, target_losses_z_replaced = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=True)
+    #     ref_losses_z, ref_variances_z, ref_losses_tokens_z, ref_losses_z_original, ref_losses_z_replaced = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=True)
+        
+    # 
+
+    #     rmia_scores = []
+    #     for i in range(RMIA_score_replaced(1.0, unreduced_loss, unreduced_loss_ref, target_losses_tokens_z, ref_losses_tokens_z, replaced_indices, cur_args)
+        
+
+    #     top_k_neighbors = []
+    #     cur_args.pop('all_singles')
+    #     cur_args['z_per_indices'] = args['z_per_indices']
+    #     for prefix_len in prefix_lens:
+    #         cur_neighbors, cur_replaced_indices = sample_generation(text, model_z, target_tokenizer, cur_args)
+    #         neighbors.extend(cur_neighbors)
+    #         replaced_indices.extend(cur_replaced_indices)
     
     if cur_args['z_sampling'] == 'perturb':
         neighbors_dl = DataLoader(list(zip(neighbors, replaced_indices)), batch_size=32, shuffle=False, collate_fn=unzip_collate)
     else:
         neighbors_dl = DataLoader(neighbors, batch_size=32, shuffle=False)
-    target_losses_z, target_variances_z, _, target_losses_z_original, target_losses_z_replaced = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=True)
-    ref_losses_z, ref_variances_z, _, ref_losses_z_original, ref_losses_z_replaced = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=True)
+    target_losses_z, target_variances_z, target_losses_tokens_z, target_losses_z_original, target_losses_z_replaced = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=True)
+    ref_losses_z, ref_variances_z, ref_losses_tokens_z, ref_losses_z_original, ref_losses_z_replaced = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=True)
     
 
     # Count fraction of z that x has higher loss than for the target model
@@ -203,7 +242,7 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
         print(neighbors)
 
     # Neighborhood attack, using cdf on neighbors
-    res[name + 'loss neighbor gaussians'] = norm.cdf(target_loss.item(), loc=torch.mean(target_losses_z).item(), scale=torch.std(target_losses_z).item())
+    # res[name + 'loss neighbor gaussians'] = norm.cdf(target_loss.item(), loc=torch.mean(target_losses_z).item(), scale=torch.std(target_losses_z).item())
 
     # RMIA attack
     rmia_losses = ref_losses_z / target_losses_z 
@@ -216,13 +255,15 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
             # Try different gammas
             # RMIA attack using loss 
             gamma = np.round(gamma, 2)
-            res[name + f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, ref_loss, rmia_losses)
-            res[name + f"RMIA^2(gamma={gamma})"] = RMIA_score_squared(gamma, target_loss, ref_loss, rmia_losses)
-            res[name + f"RMIA^1/2(gamma={gamma})"] = RMIA_score_sqrt(gamma, target_loss, ref_loss, rmia_losses)
+            if not args['no_perturbation']:
+                res[name + f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, ref_loss, rmia_losses)
+            # res[name + f"RMIA^2(gamma={gamma})"] = RMIA_score_squared(gamma, target_loss, ref_loss, rmia_losses)
+            # res[name + f"RMIA^1/2(gamma={gamma})"] = RMIA_score_sqrt(gamma, target_loss, ref_loss, rmia_losses)
 
             if cur_args['z_sampling'] == 'perturb':
-                res[name + f"RMIA_original(gamma={gamma})"] = RMIA_score_original(gamma, unreduced_loss, unreduced_loss_ref, ref_losses_z_original /target_losses_z_original, replaced_indices)
-                res[name + f"RMIA_replaced(gamma={gamma})"] = RMIA_score_replaced(gamma, unreduced_loss, unreduced_loss_ref, ref_losses_z_replaced /target_losses_z_replaced, replaced_indices)
+                if not args['no_perturbation']:
+                    res[name + f"RMIA_original(gamma={gamma})"] = RMIA_score_original(gamma, unreduced_loss, unreduced_loss_ref, ref_losses_z_original /target_losses_z_original, replaced_indices)
+                res[name + f"RMIA_replaced(gamma={gamma})"] = RMIA_score_replaced(gamma, unreduced_loss, unreduced_loss_ref, target_losses_tokens_z, ref_losses_tokens_z, replaced_indices, cur_args)
             # RMIA attack using variance
             # res[name + f"RMIA_var(gamma={gamma})"] = RMIA_score(gamma, target_variance, ref_variance, rmia_vars)
     else:
@@ -293,10 +334,28 @@ def compute_decision_online(text, target_loss, ref_loss, target_variance, ref_va
             cur_args['generate_args'] = arg
             res = evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, unreduced_loss, unreduced_loss_ref, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, cur_args)
             pred.update(res)
+    elif args['z_sampling'] == 'select_indices':
+        res = evaluate_RMIA_select(text, unreduced_loss, unreduced_loss_ref, target_tokenizer, args)
+        pred.update(res)
     # else:
     #     print("ERROR: No z_sampling method specified for online MIA attack")
     
     return pred
+
+def evaluate_RMIA_select(text, unreduced_loss, unreduced_loss_ref, target_tokenizer, args):
+    res = {}
+    num_tokens = len(target_tokenizer(text)['input_ids'])-1
+    loss_ratios = unreduced_loss[:num_tokens] / unreduced_loss_ref[:num_tokens]
+    if args['max_indices'] == 1:
+        if args['gamma'] == -1:
+            for gamma in np.arange(0.75, 1.25, 0.05):
+                # Try different gammas
+                gamma = np.round(gamma, 2)
+                res[f"RMIA_replaced(gamma={gamma})"] = 1-(torch.sum(loss_ratios < gamma)/num_tokens).item()
+        else:
+            gamma = args['gamma']
+            res[f"RMIA_replaced(gamma={gamma})"] = 1-(torch.sum(loss_ratios < gamma)/num_tokens).item()
+    return res
 
 def mia(test_data, rmia_data, target_model, ref_model, generation_model,target_tokenizer, ref_tokenizer, generation_tokenizer, args):
     if rmia_data:
@@ -345,6 +404,7 @@ def get_cli_args():
     parser.add_argument('--generation_model', type=str, default=None, help="Model to generate neighbors")
     parser.add_argument('--generation_path', type=str, default=None, help="Checkpoint path for the generation model (optional)")
     parser.add_argument('--num_z', type=int, default = 100, help="Number of neighbors to generate for each input")
+    parser.add_argument('--z_per_indices', type=int, default = 1, help="Number of neighbors to generate for each set of perturbed indices")
     parser.add_argument('-offline', action='store_true', help="Use offline RMIA")
     parser.add_argument('--input_path', type=str, default='data/newsSpace_oracle_tiny.jsonl', help="Path to the dataset")
     parser.add_argument('--z_sampling', type=str, help="Method to sample neighbors. Use 'prefix' to generate neighbors from a prefix of the input. Use 'perturb' to generate neighbors through perturbing input.")
@@ -353,9 +413,14 @@ def get_cli_args():
     parser.add_argument('-adaptive_idx', action='store_true', help="Adaptively determine prefix len to include rightmost token where target model significantly outperforms ref model")
     parser.add_argument('--description', type=str, help="Notes to add to this run (all the arguments get dumped into the output)")
     parser.add_argument('--idx_frac', type=float, help="Maximum fraction of indices to perturb")
+    parser.add_argument('--max_indices', type=int, default=0, help="Maximum number of indices to perturb")
     parser.add_argument('-perturb_span', action='store_true', help="Perturb spans instead of individual indices")
     parser.add_argument('-fixed', action='store_true', help="Perturb a fixed fraction of indices")
     parser.add_argument('-perturb_generation', action='store_true', help="Generate perturbations from model")
+    parser.add_argument('-last_idx_only', action='store_true', help="Compute RMIA scores only using the last (rightmost) replaced indices")
+    parser.add_argument('-no_perturbation', action='store_true', help="Don't actually perturb the sentence. Used as ablation for index selection.")
+    parser.add_argument('-tokenizer_perturbation', action='store_true', help="Perturb the input only through encoding and decoding with tokenizer")
+    parser.add_argument('-top_k', action='store_true', help="Select the top k indices with lowest RMIA score to generate neighbors from.")
     args = parser.parse_args()
     return vars(args)
 

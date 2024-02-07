@@ -100,13 +100,20 @@ def get_indices_span(idx_frac, num_tokens, fixed):
             indices.add(idx)
     return list(indices)
 
-def get_indices_individual(idx_frac, num_tokens, fixed):
+def get_indices_individual(idx_frac, num_tokens, fixed, max_indices=None, idx_set=None):
+    if idx_set:
+        num_tokens = len(idx_set)
     if fixed:
         num_replacements = max(math.ceil(idx_frac * num_tokens), 1)
     else:
         num_replacements = max(np.random.randint(0, math.ceil(idx_frac * num_tokens)), 1)
+    if max_indices > 0:
+        num_replacements = min(num_replacements, max_indices)
     # num_replacements = max(int(0.2 * num_tokens+1), 1)
-    indices = np.random.choice(num_tokens, num_replacements, replace=False)
+    if idx_set:
+        indices = np.random.choice(idx_set, num_replacements, replace=False)
+    else:
+        indices = np.random.choice(num_tokens, num_replacements, replace=False)
     return indices
 
 def generate_perturbation(input_ids, model, indices):
@@ -161,25 +168,47 @@ def sample_generation(sentence, model, tokenizer, args):
             #     probs[i][input_ids[0][i+1]] = 0
 
             neighbors = []
-            replaced_indices = []
-            for _ in range(args['num_z']):
-                if args['perturb_span']:
+            replaced_indices = [] 
+            # print(f"Number of index sets: {args['num_z'] // args['z_per_indices']}")
+            if 'all_singles' in args:
+                num_index_sets = len(probs)
+            else:
+                num_index_sets = args['num_z'] // args['z_per_indices']
+            for i in range(num_index_sets):
+                if 'all_singles' in args:
+                    indices = [i]
+                elif args['perturb_span']:
                     indices = get_indices_span(args['idx_frac'], len(probs), args['fixed'])
                 else:
-                    indices = get_indices_individual(args['idx_frac'], len(probs), args['fixed'])
-                if args['perturb_generation']:
-                    neighbor, cur_replaced_indices = generate_perturbation(input_ids, model, indices)
-                else:
-                    neighbor = input_ids[0].clone()
-                    cur_replaced_indices = []
-                    for idx in indices:
-                        tokens = torch.multinomial(probs[idx], 1, replacement=True)
-                        if neighbor[idx+1] != tokens[0]:
-                            neighbor[idx+1] = tokens[0]
-                            cur_replaced_indices.append(idx)
-                neighbors.append(neighbor)
-                replaced_indices.append(cur_replaced_indices)
-            complete_generated_text = tokenizer.batch_decode(neighbors, skip_special_tokens=True)
+                    if 'indices' in args:
+                        num_possible_indices = len(args['indices'])
+                        indices = get_indices_individual(args['idx_frac'], num_possible_indices, args['fixed'], args['max_indices'], args['indices'])
+                    else:
+                        num_possible_indices = min(len(probs), 149)
+                        indices = get_indices_individual(args['idx_frac'], num_possible_indices, args['fixed'], args['max_indices'])
+                
+                for _ in range(args['z_per_indices']):
+                    if args['perturb_generation']:
+                        neighbor, cur_replaced_indices = generate_perturbation(input_ids, model, indices)
+                    else:
+                        neighbor = input_ids[0].clone()
+                        cur_replaced_indices = []
+                        for idx in indices:
+                            tokens = torch.multinomial(probs[idx], 1, replacement=True)
+                            if args['no_perturbation'] or args['tokenizer_perturbation']:
+                                cur_replaced_indices.append(idx)
+                            else:
+                                if neighbor[idx+1] != tokens[0]:
+                                    neighbor[idx+1] = tokens[0]
+                                    cur_replaced_indices.append(idx)
+                    neighbors.append(neighbor)
+                    replaced_indices.append(cur_replaced_indices)
+            # print(f"Number of neighbors: {len(neighbors)}")
+            if args['no_perturbation']:
+                complete_generated_text = [sentence] * args['num_z']
+            else:
+                complete_generated_text = tokenizer.batch_decode(neighbors, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                # print(tokenizer(complete_generated_text, return_length=True).length)
             return complete_generated_text, replaced_indices
     else:
         print(f"Generating samples from {model.name_or_path}")
@@ -201,7 +230,7 @@ def sample_generation(sentence, model, tokenizer, args):
 
         output = model.generate(input_ids, max_new_tokens=len(sentence.split())-half_sentence_index, min_new_tokens=1, num_return_sequences=args['num_z'], pad_token_id=tokenizer.eos_token_id, **args['generate_args'])
         # print(output)
-        complete_generated_text = tokenizer.batch_decode(output, skip_special_tokens=True)
+        complete_generated_text = tokenizer.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         # print(complete_generated_text)
         # generated_text = complete_generated_text[:, len(prefix):]
         # generated_text = tokenizer.batch_decode(output[:, len(input_ids[0]):], skip_special_tokens=True)

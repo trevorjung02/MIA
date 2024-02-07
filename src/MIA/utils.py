@@ -77,3 +77,10 @@ def get_idx_unreduced_loss(unreduced_losses, idx):
 
 def unzip_collate(batch):
         return list(zip(*batch))
+
+def ul(unreduced_losses, idx):
+    if idx >= len(unreduced_losses[0]):
+        batch_size = len(unreduced_losses[0])
+        return unreduced_losses[idx // batch_size][idx % batch_size]
+    else:
+        return unreduced_losses[0][idx]
