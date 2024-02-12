@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --partition=gpu-l40
-#SBATCH --account=zlab
+#SBAtCH --account=ark
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:0
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_new/slurm-%j.out
 
@@ -39,7 +39,7 @@ conda activate mia
 
 # srun python src/MIA/MIA_llama.py --target_model=openai-community/gpt2-medium --ref_model=openai-community/gpt2 --gamma=-1 --input_path=data/wikimia.jsonl --z_sampling=perturb --idx_frac=0.1 -fixed --num_z=100
 
-srun python src/MIA/MIA_llama.py --target_model=swj0419/7b_finetuned_llama2_3epoch --ref_model=meta-llama/Llama-2-7b-hf --gamma=-1 --input_path=data/bookmia_debug.jsonl --z_sampling=perturb --idx_frac=0.1 -fixed --num_z=100
+# srun python src/MIA/MIA_llama.py --target_model=swj0419/7b_finetuned_llama2_3epoch --ref_model=meta-llama/Llama-2-7b-hf --gamma=-1 --input_path=data/bookmia_debug.jsonl --z_sampling=perturb --idx_frac=0.1 -fixed --num_z=100
 
 # srun python src/MIA/MIA_llama.py --target_model=EleutherAI/pythia-160m-deduped --target_path=checkpoints/gpt2/run_12/epoch-3_perplexity-111.0108 --ref_model=EleutherAI/pythia-160m-deduped --gamma=-1 --input_path=data/sentiment140_oracle_debug.jsonl --z_sampling=perturb --idx_frac=0.1 -fixed --num_z=250 -no_perturbation
 
