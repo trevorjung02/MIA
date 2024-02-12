@@ -241,6 +241,8 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
         print(target_losses_z)
         print(neighbors)
 
+    res[name + 'mean(loss/neighbors)'] =torch.mean(target_loss / target_losses_z).item()
+    
     # Neighborhood attack, using cdf on neighbors
     # res[name + 'loss neighbor gaussians'] = norm.cdf(target_loss.item(), loc=torch.mean(target_losses_z).item(), scale=torch.std(target_losses_z).item())
 
@@ -273,6 +275,8 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
 
     # RMIA attack where the mean of the neighbors is used instead of individual comparisons.
     res[name + 'RMIA mean'] = (target_loss / ref_loss * torch.mean(rmia_losses)).item()
+
+    res[name + 'RMIA mean ratios'] = torch.mean(target_loss / ref_loss * rmia_losses).item()
     return res
 
 def compute_decision_offline(target_loss, ref_loss, target_losses_z, ref_losses_z, args):
@@ -397,7 +401,7 @@ def get_name(path):
 def get_cli_args():
     parser = ArgumentParser()
     parser.add_argument('--gamma', type=float, default=1, help="Gamma for RMIA. Set to -1 to use multiple gamma values.")
-    parser.add_argument('--target_path', type=str, required=True, help="Checkpoint path for the target model")
+    parser.add_argument('--target_path', type=str, help="Checkpoint path for the target model")
     parser.add_argument('--target_model', type=str, default='gpt2', help="Model name of the target model, gpt2 by default")
     parser.add_argument('--ref_path', type=str, default=None, help="Checkpoint path for the reference model (optional)")
     parser.add_argument('--ref_model', type=str, default='gpt2', help="Model name of the reference model, gpt2 by default")
