@@ -1,5 +1,9 @@
 from argparse import ArgumentParser
 import torch
+from datasets import load_dataset
+import json
+import pandas as pd
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def sample_generation(sentence, model, tokenizer, args):
     half_sentence_index = math.ceil(len(sentence.split())*args['idx_frac'])
@@ -61,14 +65,33 @@ def load_model(name, path=None):
         model.load_state_dict(ckpt['model_state_dict'])
 
     model.eval()
+    if name == "swj0419/7b_finetuned_llama2_3epoch":
+        name = "meta-llama/Llama-2-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained(name)
     tokenizer.pad_token = tokenizer.eos_token
 
     return model, tokenizer
     
 def main():
-    args = get_cli_args()
-    target_model, target_tokenizer, = load_model(args['target_model'], path=args['target_path'])
+    CACHE_DIR = '/gscratch/zlab/swj0419/MIA/huggingface'
+    LENGTH = 128
+    dataset = load_dataset("swj0419/WikiMIA", split=f"WikiMIA_length{LENGTH}")
 
+    # args = get_cli_args()
+    args = {
+        "target_path": None,
+        '--target_model': 'gpt2',
+        '--num_z': 1,
+        '--idx_frac': 0.5,
+        'generate_args': {'do_sample': True}
+    }
+    target_model, target_tokenizer, = load_model(args['target_model'], path=args['target_path'])
+    
+    df = pd.DataFrame(dataset)
+    train_df = df[df['label'] ==1 ]
+    train_data = train_df['input'].tolist()
+    for s in train_data:
+        neighbors = sample_generation(s, target_model, target_tokenizer, args)
+        
 if __name__ == '__main__':
     main()

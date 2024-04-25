@@ -5,6 +5,12 @@ import math
 from transformers import LogitsWarper, LogitsProcessorList, LogitsProcessor
 import copy
 import numpy as np
+import random
+import heapq
+from sentence_transformers import SentenceTransformer, util
+from rank_bm25 import BM25Okapi
+from rouge_score import rouge_scorer
+from openai import OpenAI
 
 def get_alt_text(original_text, decoded_alt_text):
     lower_text = original_text.lower()
@@ -100,7 +106,7 @@ def get_indices_span(idx_frac, num_tokens, fixed):
             indices.add(idx)
     return list(indices)
 
-def get_indices_individual(idx_frac, num_tokens, fixed, max_indices=None, idx_set=None):
+def get_indices_individual(idx_frac, num_tokens, fixed, max_indices=0, idx_set=None):
     if idx_set:
         num_tokens = len(idx_set)
     if fixed:
@@ -150,32 +156,85 @@ def generate_perturbation(input_ids, model, indices):
             # output_tokens[indices[i]] = torch.multinomial(probs, 1, replacement=True)
         return output_tokens, cur_replaced_indices
 
+@torch.no_grad
+def generate_neighbors_bert(text, search_model, search_tokenizer, args):
+    print(f"Generating samples from perturbation using {search_model.name_or_path}, with idx_frac = {args['idx_frac']}. Tokenizer is {search_tokenizer.name_or_path}")
+    text_tokenized = search_tokenizer(text, padding = True, truncation = True, max_length = 150, return_tensors='pt').input_ids.to(search_model.device)
+    original_text = search_tokenizer.batch_decode(text_tokenized)[0]
+    
+    candidate_scores = dict()
+    replacements = dict()
+
+    token_dropout = torch.nn.Dropout(p=0.7)
+
+    # print(len(text_tokenized[0,:]))
+    
+    idx_set = list(range(len(text_tokenized[0,:])))[1:-1]
+    # print(idx_set)
+
+    neighbors = []
+    for _ in range(args['num_z']):
+        indices = get_indices_individual(args['idx_frac'], len(idx_set), args['fixed'], args['max_indices'], idx_set=idx_set)
+        # print(indices)
+    
+        embeds = search_model.bert.embeddings(text_tokenized)
+        for idx in indices:
+            target_token = text_tokenized[0,idx]
+            embeds = torch.cat((embeds[:,:idx,:], token_dropout(embeds[:,idx,:]).unsqueeze(dim=0), embeds[:,idx+1:,:]), dim=1)
+        token_probs = torch.softmax(search_model(inputs_embeds=embeds).logits, dim=2)
+    
+        neighbor = text_tokenized.clone()
+        cur_replaced_indices = []
+        for idx in indices:
+            tokens = torch.multinomial(token_probs[0, idx], 1, replacement=True)
+            if neighbor[0, idx] != tokens[0]:
+                neighbor[0, idx] = tokens[0]
+                cur_replaced_indices.append(idx)
+        neighbors.append(neighbor)
+    
+    complete_generated_text = search_tokenizer.batch_decode(torch.cat(neighbors), clean_up_tokenization_spaces=False, skip_special_tokens=True)
+    
+    return complete_generated_text
 
 def sample_generation(sentence, model, tokenizer, args):
     if args['z_sampling'] == 'perturb':
-        print(f"Generating samples from perturbation, with idx_frac = {args['idx_frac']}")
+        print(f"Generating samples from perturbation using {model.name_or_path}, with idx_frac = {args['idx_frac']}. Tokenizer is {tokenizer.name_or_path}")
         with torch.no_grad():
             input_ids = torch.tensor(tokenizer.encode(sentence)).unsqueeze(0)
             input_ids = input_ids.to(model.device)
             logits = model(input_ids).logits[0][:-1]
 
-            # for i in range(len(logits)):
-            #     logits[i][input_ids[0][i+1]] = -float("Inf")
+            if args['force_perturb']:
+                for i in range(len(logits)):
+                    logits[i][input_ids[0][i+1]] = -float("Inf")
                 
             probs = torch.nn.functional.softmax(logits, dim=-1)
-            
+            if len(probs) == 0:
+                return None, None
+
+            if args['ref_similarity']:
+                print("Using ref_similarity")
+                model_ref = args['ref_pointer']
+                logits_ref = model_ref(input_ids).logits[0][:-1]
+                
+                if args['force_perturb']:
+                    for i in range(len(logits_ref)):
+                        logits_ref[i][input_ids[0][i+1]] = -float("Inf")
+
+                probs_ref = torch.nn.functional.softmax(logits_ref, dim=-1)
+                
             # for i in range(len(probs)):
             #     probs[i][input_ids[0][i+1]] = 0
 
             neighbors = []
             replaced_indices = [] 
             # print(f"Number of index sets: {args['num_z'] // args['z_per_indices']}")
-            if 'all_singles' in args:
+            if args['all_singles']:
                 num_index_sets = len(probs)
             else:
                 num_index_sets = args['num_z'] // args['z_per_indices']
             for i in range(num_index_sets):
-                if 'all_singles' in args:
+                if args['all_singles']:
                     indices = [i]
                 elif args['perturb_span']:
                     indices = get_indices_span(args['idx_frac'], len(probs), args['fixed'])
@@ -194,12 +253,25 @@ def sample_generation(sentence, model, tokenizer, args):
                         neighbor = input_ids[0].clone()
                         cur_replaced_indices = []
                         for idx in indices:
-                            tokens = torch.multinomial(probs[idx], 1, replacement=True)
+                            if args['top_prob']:
+                                token = torch.argmax(probs[idx])
+                            elif args['random_select']:
+                                token = torch.randint(0, len(probs[idx]), (1,))[0]
+                            elif args['ref_similarity']:
+                                c = args['ref_similarity_c']
+                                weighted_probs = probs[idx] + probs_ref[idx] - c * (torch.abs(probs[idx]-probs_ref[idx]))
+                                # print(torch.topk(weighted_probs, 5))
+                                # print(tokenizer.decode(torch.argmax(weighted_probs)))
+                                token = torch.argmax(weighted_probs)
+                                # print(probs[idx][token])
+                                # print(probs_ref[idx][token])
+                            else:
+                                token = torch.multinomial(probs[idx], 1, replacement=True)[0]
                             if args['no_perturbation'] or args['tokenizer_perturbation']:
                                 cur_replaced_indices.append(idx)
                             else:
-                                if neighbor[idx+1] != tokens[0]:
-                                    neighbor[idx+1] = tokens[0]
+                                if neighbor[idx+1] != token:
+                                    neighbor[idx+1] = token
                                     cur_replaced_indices.append(idx)
                     neighbors.append(neighbor)
                     replaced_indices.append(cur_replaced_indices)
@@ -211,7 +283,7 @@ def sample_generation(sentence, model, tokenizer, args):
                 # print(tokenizer(complete_generated_text, return_length=True).length)
             return complete_generated_text, replaced_indices
     else:
-        print(f"Generating samples from {model.name_or_path}")
+        print(f"Generating samples from prefixes using {model.name_or_path}, with idx_frac = {args['idx_frac']}. Tokenizer is {tokenizer.name_or_path}")
         half_sentence_index = math.ceil(len(sentence.split())*args['idx_frac'])
         if args['adaptive_prefix_length'] < len(sentence.split())-1 and args['adaptive_prefix_length'] > half_sentence_index:
             half_sentence_index = args['adaptive_prefix_length']
@@ -236,6 +308,81 @@ def sample_generation(sentence, model, tokenizer, args):
         # generated_text = tokenizer.batch_decode(output[:, len(input_ids[0]):], skip_special_tokens=True)
         # print(generated_text)
         return complete_generated_text
+
+def sample_pop_data(q, args):
+    if 'bm25' in args:
+        bm25 = args['bm25']
+        tokenized_query = q.split(" ")
+        closest = bm25.get_top_n(tokenized_query, args['pop_data'], n=args['num_z'] * 10)
+        
+    if args['pop_distance'] == 'rougeL':
+        print("Sampling population data by maximizing rougeL")
+
+        corpus_embeddings = args['corpus_embeddings']
+        corpus = args['pop_data']
+        embedder = args['embedder']
+        
+        query_embeddings = embedder.encode([q], convert_to_tensor=True)
+        query_embeddings = query_embeddings.to("cuda")
+        query_embeddings = util.normalize_embeddings(query_embeddings)
+        hits = util.semantic_search(query_embeddings, corpus_embeddings, score_function=util.dot_score, top_k=args['num_z']*10)
+        closest = [corpus[hits[0][i]['corpus_id']] for i in range(args['num_z'])]
+        
+        scorer = rouge_scorer.RougeScorer(['rougeL'])
+        scores = [scorer.score(q, reference)['rougeL'][2] for reference in closest]
+        indices = heapq.nlargest(args['num_z'], list(range(len(scores))), key=lambda i: scores[i])
+        return [closest[i] for i in indices]
+    elif args['pop_distance'] == 'rouge1':
+        print("Sampling population data by maximizing rouge1")
+        scorer = rouge_scorer.RougeScorer(['rouge1'])
+        scores = [scorer.score(q, reference)['rouge1'][2] for reference in closest]
+        indices = heapq.nlargest(args['num_z'], list(range(len(scores))), key=lambda i: scores[i])
+        return [closest[i] for i in indices]
+    elif args['pop_distance'] == 'rouge2':
+        print("Sampling population data by maximizing rouge2")
+        scorer = rouge_scorer.RougeScorer(['rouge2'])
+        scores = [scorer.score(q, reference)['rouge2'][2] for reference in closest]
+        indices = heapq.nlargest(args['num_z'], list(range(len(scores))), key=lambda i: scores[i])
+        return [closest[i] for i in indices]
+    elif args['pop_distance']  == 'lcs':
+        print("Sampling population data by maximizing lcs")
+        scores = [pylcs.lcs_sequence_length(q, reference) for reference in closest]
+        indices = heapq.nlargest(args['num_z'], list(range(len(scores))), key=lambda i: scores[i])
+        return [closest[i] for i in indices]
+    elif args['pop_distance']  == 'edit distance':
+        print("Sampling population data by minimizing edit distance")
+        scores = [pylcs.edit_distance(q, reference) for reference in closest]
+        indices = heapq.nsmallest(args['num_z'], list(range(len(scores))), key=lambda i: scores[i])
+        return [closest[i] for i in indices]
+    elif args['pop_distance'] == 'semantic':
+        print("Sampling population data by maximizing semantic similarity")
+        corpus_embeddings = args['corpus_embeddings']
+        corpus = args['pop_data']
+        embedder = args['embedder']
+        
+        query_embeddings = embedder.encode([q], convert_to_tensor=True)
+        query_embeddings = query_embeddings.to("cuda")
+        query_embeddings = util.normalize_embeddings(query_embeddings)
+        hits = util.semantic_search(query_embeddings, corpus_embeddings, score_function=util.dot_score, top_k=args['num_z'])
+        return [corpus[hits[0][i]['corpus_id']] for i in range(args['num_z'])]
+    else:
+        print("Sampling population data")
+        return random.sample(args['pop_data'], args['num_z'])
+
+def generate_paraphrases(text, args):
+    prompt = args['prompt'].replace('TEXT', text)
+    print(f"Generating paraphrases from gpt with the prompt: {prompt}")
+
+    completion = client.chat.completions.create(
+      model="gpt-3.5-turbo",
+      messages=[  
+        # {"role": "user", "content": f"Paraphrase the following text while keeping rare words: {s}"}
+        {"role": "user", "content": prompt}
+      ],
+      n=args['num_z']
+    )
+    s_outs = [choice.message.content for choice in completion.choices]
+    return s_outs
 
 class ContrastiveDecodingLogitsProcessor(LogitsProcessor):
     def __init__(self, amateur, alpha) -> None:

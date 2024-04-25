@@ -46,9 +46,16 @@ def evaluate_model(model, tokenizer, dl, replace=False):
                 num_original_indices = num_tokens - num_replaced_indices
 
                 unreduced_loss_original = torch.clone(unreduced_loss)
+        
                 for i in range(len(replaced_indices)):
-                    for idx in replaced_indices[i]:
-                        unreduced_loss_original[i][idx] = 0
+                    indices_to_remove = set()
+                    for idx in replaced_indices[i]: 
+                        if idx < len(unreduced_loss_original[i]):
+                            unreduced_loss_original[i][idx] = 0
+                        else:
+                            indices_to_remove.add(idx)
+                    for idx in indices_to_remove:
+                        replaced_indices[i].remove(idx)
                 loss_sum_original = torch.sum(unreduced_loss_original, dim=1)
                 losses_original.append(loss_sum_original / num_original_indices)
 

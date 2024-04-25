@@ -1,7 +1,7 @@
 import json
 import random
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM, GPTNeoXForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPTNeoXForCausalLM, BertForMaskedLM
 import torch
 from argparse import ArgumentParser
 import os
@@ -17,7 +17,15 @@ def create_new_dir(dir: str) -> str:
         while f"run_{num}" in files:
             num += 1
     new_dir = os.path.join(dir, f"run_{num}")
-    os.makedirs(new_dir, exist_ok=False)
+    done = False
+    while not done:
+        try:
+            os.makedirs(new_dir, exist_ok=False)
+        except: 
+            num += 1
+            new_dir = os.path.join(dir, f"run_{num}")
+        else:
+            done = True
     return new_dir
 
 def load_jsonl(input_path):
@@ -59,21 +67,30 @@ def load_model(name, path=None):
            load_in_8bit=True,
             cache_dir=CACHE_DIR
         )
+    elif "bert" in name:
+        model = BertForMaskedLM.from_pretrained('bert-base-cased', return_dict=True, cache_dir=CACHE_DIR).cuda()
     
     if path:
         ckpt = torch.load(path)
         model.load_state_dict(ckpt['model_state_dict'])
 
     model.eval()
-    if name == "swj0419/7b_finetuned_llama2_3epoch":
-        name = "meta-llama/Llama-2-7b-hf"
-    tokenizer = AutoTokenizer.from_pretrained(name)
-    tokenizer.pad_token = tokenizer.eos_token
+    if "swj0419" in name or "tjung2" in name:
+        tokenizer = None
+    elif "bert" in name:
+        tokenizer = AutoTokenizer.from_pretrained(name)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(name)
+        tokenizer.pad_token = tokenizer.eos_token
 
     return model, tokenizer
 
 def jsonl_to_list(test_data):
     test_json = json.dumps(test_data)
-    test_df = pd.read_json(io.StringIO(test_json))['input']
+    test_df = pd.read_json(io.StringIO(test_json))
+    if 'syn' in test_df.columns:
+        test_df = test_df['syn']
+    else:
+        test_df = test_df['input']
     test_list = test_df.astype(str).tolist()
     return test_list
