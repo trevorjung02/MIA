@@ -259,6 +259,7 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
 
     # Count fraction of z that x has higher loss than for the target model
     for gamma in np.arange(0.8, 1.5, 0.05):
+        gamma = np.round(gamma, 2)
         ratio = torch.count_nonzero(target_losses_z < gamma * target_loss).item() / len(target_losses_z)
         res[name + f"neighbor(gamma={gamma})"] = ratio
 
