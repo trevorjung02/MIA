@@ -75,8 +75,11 @@ def load_model(name, path=None):
         model.load_state_dict(ckpt['model_state_dict'])
 
     model.eval()
-    if "swj0419" in name or "tjung2" in name:
+    if "swj0419" in name:
         tokenizer = None
+    elif "gpt2" in name:
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token
     elif "bert" in name:
         tokenizer = AutoTokenizer.from_pretrained(name)
     else:

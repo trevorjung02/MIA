@@ -6,6 +6,11 @@ from sentence_transformers import SentenceTransformer, util
 from rank_bm25 import BM25Okapi
 from tqdm import tqdm
 import pylcs
+import numpy as np
+import editdistance
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
 def create_new_dir(dir: str) -> str:
     """Automatically create directory for saving result of run with path 'dir/run_#'"""
@@ -45,7 +50,8 @@ def add_distances(df, corpus, n):
     tokenized_corpus = [doc.split(" ") for doc in corpus]
     bm25 = BM25Okapi(tokenized_corpus)
     
-    metrics = ['rougeL', 'rouge1', 'rouge2', 'lcs', 'edit distance'] 
+    # metrics = ['rougeL', 'rouge1', 'rouge2', 'lcs', 'edit distance'] 
+    metrics = ['edit distance'] 
     scores = {d: [] for d in metrics} 
     closest_refs = {d: [] for d in metrics} 
     for i in tqdm(range(len(df))):
@@ -96,10 +102,12 @@ def get_score_and_ref(q, closest, d):
                 score = cur_score
                 best_ref = reference
     elif d == 'edit distance':
-        score = 1
+        q_ids = tokenizer(q)['input_ids']
+        score = np.inf
         for reference in closest:
             # print(reference)
-            cur_score = pylcs.edit_distance(q, reference) / len(q)
+            reference_ids = tokenizer(reference)['input_ids']
+            cur_score = editdistance.eval(q_ids, reference_ids) / len(q_ids)
             if cur_score < score:
                 score = cur_score
                 best_ref = reference
@@ -132,7 +140,7 @@ def main():
     corpus = corpus_df['description'].tolist()
 
     # Path to mia evaluation data
-    mia_dataset_path = '/mmfs1/gscratch/zlab/swj0419/MIA/data/newsSpace_oracle_debug.jsonl'
+    mia_dataset_path = '/mmfs1/gscratch/zlab/swj0419/MIA/data/newsSpace_oracle_1000.jsonl'
     output = read_jsonl(mia_dataset_path)
     
     df = pd.DataFrame(output)

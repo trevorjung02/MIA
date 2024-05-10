@@ -9,6 +9,7 @@ def evaluate_model(model, tokenizer, dl, replace=False):
         losses_replaced = []
         variances = []
         unreduced_losses = []
+        logits = []
         for sentence_batch in dl:
             # print(sentence_batch)
             if replace:
@@ -23,6 +24,7 @@ def evaluate_model(model, tokenizer, dl, replace=False):
             batch = batch.to(model.device)
             
             outputs = model(batch['input_ids'], attention_mask=batch['attention_mask'], labels=batch['labels'])
+        
             # Shift so that tokens < n predict n
             shift_logits = outputs.logits[..., :-1, :].contiguous()
             shift_labels = batch['labels'][..., 1:].contiguous()
@@ -67,15 +69,18 @@ def evaluate_model(model, tokenizer, dl, replace=False):
                 loss_sum_replaced = torch.sum(unreduced_loss_replaced, dim=1)
                 losses_replaced.append(loss_sum_replaced / num_replaced_indices)
 
+            lens = torch.sum(batch['attention_mask'], dim=-1).cpu()
+            outputs.logits = outputs.logits.cpu()
+            for i in range(len(batch['input_ids'])):
+                logits.append(outputs.logits[i][:lens[i]])
+                
         variances = torch.cat(variances)
         losses = torch.cat(losses)
         if replace:
             losses_original = torch.cat(losses_original)
             losses_replaced = torch.cat(losses_replaced)
-        # with torch.no_grad():
-        #     outputs = model(batch['input_ids'], attention_mask=batch['attention_mask'], labels=batch['labels'])
-        #     losses.append(outputs.loss)
-    return losses, variances, unreduced_losses, losses_original, losses_replaced
+            
+    return losses, variances, unreduced_losses, losses_original, losses_replaced, logits
 
 
 def get_idx_unreduced_loss(unreduced_losses, idx):

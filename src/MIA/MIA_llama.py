@@ -14,6 +14,7 @@ from pathlib import Path
 from pprint import pprint
 from tqdm import tqdm
 from torch.nn import CrossEntropyLoss
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from argparse import ArgumentParser
 from sklearn.metrics import auc, roc_curve
@@ -218,8 +219,8 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
 
     # if cur_args['top_k']:
     #     neighbors_dl = DataLoader(list(zip(neighbors, replaced_indices)), batch_size=32, shuffle=False, collate_fn=unzip_collate)
-    #     target_losses_z, target_variances_z, target_losses_tokens_z, target_losses_z_original, target_losses_z_replaced = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=True)
-    #     ref_losses_z, ref_variances_z, ref_losses_tokens_z, ref_losses_z_original, ref_losses_z_replaced = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=True)
+    #     target_losses_z, target_variances_z, target_losses_tokens_z, target_losses_z_original, target_losses_z_replaced,_ = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=True)
+    #     ref_losses_z, ref_variances_z, ref_losses_tokens_z, ref_losses_z_original, ref_losses_z_replaced,_ = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=True)
         
     # 
 
@@ -245,11 +246,11 @@ def evaluate_RMIA(text, target_loss, ref_loss, target_variance, ref_variance, un
         replace = True
 
     neighbor_losses = []
-    target_losses_z, target_variances_z, target_losses_tokens_z, target_losses_z_original, target_losses_z_replaced = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=replace)
+    target_losses_z, target_variances_z, target_losses_tokens_z, target_losses_z_original, target_losses_z_replaced,_ = evaluate_model(target_model, target_tokenizer, neighbors_dl, replace=replace)
     for i in range(len(neighbors)):
         neighbor_losses.append({'neighbor': neighbors[i], 'target_loss': target_losses_z[i].item()})
     if ref_model:
-        ref_losses_z, ref_variances_z, ref_losses_tokens_z, ref_losses_z_original, ref_losses_z_replaced = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=replace)
+        ref_losses_z, ref_variances_z, ref_losses_tokens_z, ref_losses_z_original, ref_losses_z_replaced,_ = evaluate_model(ref_model, ref_tokenizer, neighbors_dl, replace=replace)
         for i in range(len(neighbors)):
             neighbor_losses[i]['ref_loss'] = ref_losses_z[i].item()
 
@@ -336,18 +337,49 @@ def compute_decision_offline(target_loss, ref_loss, target_losses_z, ref_losses_
         pred[f"RMIA(gamma={gamma})"] = RMIA_score(gamma, target_loss, ref_loss, rmia_losses)
     return pred
 
-def compute_decision_online(text, target_loss, ref_loss, target_variance, ref_variance, unreduced_loss, unreduced_loss_ref, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, search_model, search_tokenizer, args):
+def compute_decision_online(text, target_loss, ref_loss, target_logits, target_variance, ref_variance, unreduced_loss, unreduced_loss_ref, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, search_model, search_tokenizer, args):
     # Do all the MIA attacks, and use the online version of RMIA 
     torch.cuda.empty_cache()
     print(f"text = {text}")
     pred = {}
 
-    # zlib_entropy = len(zlib.compress(bytes(text, 'utf-8')))
+    zlib_entropy = len(zlib.compress(bytes(text, 'utf-8')))
 
     # Loss attack
     pred["loss"] = target_loss.item()
     # Loss attack with entropy 
-    # pred["loss/zlib"] = (target_loss / zlib_entropy).item()
+    pred["loss/zlib"] = (target_loss / zlib_entropy).item()
+
+    # Min k and Min k++ 
+    input_ids = target_tokenizer(text, return_tensors='pt', truncation=True, max_length=150)['input_ids'].to(target_model.device)
+    input_ids = input_ids[0][1:].unsqueeze(-1)
+    target_logits = target_logits.to(target_model.device)
+    probs = F.softmax(target_logits[:-1], dim=-1)
+    log_probs = F.log_softmax(target_logits[:-1], dim=-1)
+    token_log_probs = log_probs.gather(dim=-1, index=input_ids).squeeze(-1)
+    mu = (probs * log_probs).sum(-1)
+    sigma = (probs * torch.square(log_probs)).sum(-1) - torch.square(mu)
+
+    # print("input_ids", input_ids.shape)
+    # print("probs", probs.shape)
+    # print("log_probs", log_probs.shape)
+    # print("token_log_probs", token_log_probs.shape)
+    # print("mu", mu.shape)
+    # print("sigma", sigma.shape)
+
+    ## mink
+    for ratio in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+        k_length = max(1, int(len(token_log_probs) * ratio))
+        topk = np.sort(token_log_probs.cpu())[:k_length]
+        pred[f'mink_{ratio}'] = -np.mean(topk).item()
+    
+    ## mink++
+    mink_plus = (token_log_probs - mu) / sigma.sqrt()
+    for ratio in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+        k_length = max(1, int(len(mink_plus) * ratio))
+        topk = np.sort(mink_plus.cpu())[:k_length]
+        pred[f'mink++_{ratio}'] = -np.mean(topk).item()
+
     # Reference attack
     if ref_model:
         pred["loss/ref_loss"] = (target_loss/ref_loss).item()
@@ -409,8 +441,8 @@ def mia(test_data, rmia_data, target_model, ref_model, generation_model,target_t
     if rmia_data:
         print("Running offline RMIA")
         rmia_dl = DataLoader(rmia_data, batch_size=32, shuffle=False)
-        target_losses_z, target_variances_z, _, _, _ = evaluate_model(target_model, target_tokenizer, rmia_dl)
-        ref_losses_z, ref_variances_z, _, _, _ = evaluate_model(ref_model, ref_tokenizer, rmia_dl)
+        target_losses_z, target_variances_z, _, _, _,_ = evaluate_model(target_model, target_tokenizer, rmia_dl)
+        ref_losses_z, ref_variances_z, _, _, _,_ = evaluate_model(ref_model, ref_tokenizer, rmia_dl)
     # else:
     #     print("Running online RMIA")
     #     CACHE_DIR = '/mmfs1/gscratch/ark/tjung2/continual-knowledge-learning/huggingface'
@@ -419,9 +451,9 @@ def mia(test_data, rmia_data, target_model, ref_model, generation_model,target_t
 
     test_list = jsonl_to_list(test_data)
     test_dl = DataLoader(test_list, batch_size=32, shuffle=False)
-    target_losses, target_variances, unreduced_losses, _, _ = evaluate_model(target_model, target_tokenizer, test_dl) 
+    target_losses, target_variances, unreduced_losses, _, _,target_logits = evaluate_model(target_model, target_tokenizer, test_dl) 
     if ref_model:
-        ref_losses, ref_variances, unreduced_losses_ref, _, _ = evaluate_model(ref_model, ref_tokenizer, test_dl)
+        ref_losses, ref_variances, unreduced_losses_ref, _, _,_ = evaluate_model(ref_model, ref_tokenizer, test_dl)
 
     all_output = []
     neighbor_losses_all = []
@@ -437,11 +469,11 @@ def mia(test_data, rmia_data, target_model, ref_model, generation_model,target_t
                 pred = compute_decision_offline(target_losses[i], None, target_losses_z, None, args)
         else:
             if ref_model:
-                pred, neighbor_losses = compute_decision_online(test_list[i], target_losses[i], ref_losses[i], target_variances[i], ref_variances[i], 
+                pred, neighbor_losses = compute_decision_online(test_list[i], target_losses[i], ref_losses[i], target_logits[i], target_variances[i], ref_variances[i], 
                 get_idx_unreduced_loss(unreduced_losses, i), 
                 get_idx_unreduced_loss(unreduced_losses_ref, i), target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, None, None, args)
             else:
-                pred, neighbor_losses = compute_decision_online(test_list[i], target_losses[i], None, target_variances[i], None, 
+                pred, neighbor_losses = compute_decision_online(test_list[i], target_losses[i], None, target_logits[i], target_variances[i], None, 
                 get_idx_unreduced_loss(unreduced_losses, i), 
                 None, target_model, ref_model, generation_model, target_tokenizer, ref_tokenizer, generation_tokenizer, None, None, args)
             if neighbor_losses:
